@@ -174,7 +174,7 @@ public class RootPaneView implements Initializable {
         }
         Task<List<String>> task = new Task<List<String>>() {
             @Override
-            protected List<String> call() {
+            protected List<String> call() throws ImportException {
                 List<String> messages = new ArrayList<>();
                 DecimalFormat decimalFormat = (DecimalFormat) NumberFormat.getIntegerInstance();
                 decimalFormat.setMinimumFractionDigits(0);
@@ -314,14 +314,16 @@ public class RootPaneView implements Initializable {
                                 insertTask(taskName, executorFI, creationDate, extRefNum, rid, messages);
                             }
                             updateProgress(row.getRowNum(), totalRows);
-                        } catch (Exception e) {
+                        } catch (SQLException e) {
                             messages.add("Ошибка при обработке строки " + (row.getRowNum() + 1) + ": " + e.getMessage());
                         }
                     }
-                }
-                catch(Exception e) {
+                } catch(IOException e) {
+                    messages.add("Критическая ошибка ввода-вывода: " + e.getMessage());
+                    throw new ImportException("IO error during import", e);
+                } catch(Exception e) {
                     messages.add("Критическая ошибка: " + e.getMessage());
-                    throw new RuntimeException(e);
+                    throw new ImportException("Unexpected error during import", e);
                 }
                 return messages;
             }
@@ -475,72 +477,19 @@ public class RootPaneView implements Initializable {
     @FXML
     private void handleGenerateReportClick() {
         File dstFile = new File(lblOutputDir.getText(), tfOutputFileName.getText());
-        if (dstFile.exists()) {
-            Alert alert = new Alert(Alert.AlertType.WARNING);
-            alert.setTitle("Подтверждение");
-            alert.setHeaderText("Такой файл уже существует. Перезаписать его?");
-            ButtonType btnYes = new ButtonType("Да");
-            ButtonType btnNo = new ButtonType("Нет");
-            alert.getButtonTypes().setAll(btnYes, btnNo);
-            ((Button) alert.getDialogPane().lookupButton(btnYes)).setDefaultButton(false);
-            ((Button) alert.getDialogPane().lookupButton(btnNo)).setDefaultButton(true);
-            Optional<ButtonType> result = alert.showAndWait();
-            if (result.isPresent() && result.get() == btnNo)
-                return;
+        if (!confirmFileOverwrite(dstFile)) {
+            return;
         }
 
         XSSFWorkbook workbook = new XSSFWorkbook();
         Sheet sheet = workbook.createSheet("Отчёт по заявкам");
-        sheet.setColumnWidth(0, 6600);
-        sheet.setColumnWidth(1, 3800);
-        sheet.setColumnWidth(2, 10560);
-        sheet.setColumnWidth(3, 3800);
-        sheet.setColumnWidth(4, 3800);
-        sheet.setColumnWidth(5, 3800);
-        sheet.setColumnWidth(6, 11880);
-        sheet.setColumnWidth(7, 9240);
+        setupSheetColumns(sheet);
+        
         putCaption(workbook, sheet);
-        List<ReportRecord> records = loadRecords(dtpckStart.getValue(), dtpckEnd.getValue(), false);
-        int rowNum = 2;
-        int hoursERP = 0;
-        int hoursEAM = 0;
-        for (ReportRecord r: records) {
-            if (r.taskName().startsWith("SAP") || r.taskName().startsWith("САП"))
-                continue;
-            if (r.taskName().startsWith("EAM") || r.taskName().startsWith("ЕАМ"))
-                hoursEAM += r.totals();
-            else
-                hoursERP += r.totals();
-            putReportRecord(workbook, sheet, r, rowNum++);
-        }
-        rowNum += 2;
-        putKNZPTotals(workbook, sheet, hoursERP, hoursEAM, costERP, costEAM, rowNum++);
-
-        records = loadRecords(dtpckStart.getValue(), dtpckEnd.getValue(), true);
-        if (!records.isEmpty()) {
-            rowNum += 4;
-            Map<String, Integer> hrsByCat = new HashMap<>();
-            for (ReportRecord r: records) {
-                if (hrsByCat.containsKey(r.userCategory())) {
-                    hrsByCat.put(r.userCategory(), hrsByCat.get(r.userCategory()) + r.totals());
-                } else {
-                    hrsByCat.put(r.userCategory(), r.totals());
-                }
-            }
-            rowNum = putRNTTotals(workbook, sheet, hrsByCat, rowNum) + 2;
-            for (ReportRecord r: records) {
-                putReportRecord(workbook, sheet, r, rowNum++);
-            }
-        }
-        String fileLocation = lblOutputDir.getText() + "\\" + tfOutputFileName.getText();
-        try {
-            FileOutputStream outputStream = new FileOutputStream(fileLocation);
-            workbook.write(outputStream);
-            workbook.close();
-            Desktop.getDesktop().open(new File(fileLocation));
-        } catch (IOException e) {
-            Utils.showErrorAndStack(e);
-        }
+        int rowNum = processMainRecords(workbook, sheet);
+        processRNTRecords(workbook, sheet, rowNum);
+        
+        saveAndOpenWorkbook(workbook);
     }
 
     private void putCaption(XSSFWorkbook workbook, Sheet sheet) {
@@ -591,6 +540,102 @@ public class RootPaneView implements Initializable {
         cell = header.createCell(6);
         cell.setCellValue("Пользователь");
         cell.setCellStyle(headerStyle);
+    }
+
+    private boolean confirmFileOverwrite(File dstFile) {
+        if (!dstFile.exists()) {
+            return true;
+        }
+        
+        Alert alert = new Alert(Alert.AlertType.WARNING);
+        alert.setTitle("Подтверждение");
+        alert.setHeaderText("Такой файл уже существует. Перезаписать его?");
+        ButtonType btnYes = new ButtonType("Да");
+        ButtonType btnNo = new ButtonType("Нет");
+        alert.getButtonTypes().setAll(btnYes, btnNo);
+        ((Button) alert.getDialogPane().lookupButton(btnYes)).setDefaultButton(false);
+        ((Button) alert.getDialogPane().lookupButton(btnNo)).setDefaultButton(true);
+        Optional<ButtonType> result = alert.showAndWait();
+        return !(result.isPresent() && result.get() == btnNo);
+    }
+
+    private void setupSheetColumns(Sheet sheet) {
+        sheet.setColumnWidth(0, 6600);
+        sheet.setColumnWidth(1, 3800);
+        sheet.setColumnWidth(2, 10560);
+        sheet.setColumnWidth(3, 3800);
+        sheet.setColumnWidth(4, 3800);
+        sheet.setColumnWidth(5, 3800);
+        sheet.setColumnWidth(6, 11880);
+        sheet.setColumnWidth(7, 9240);
+    }
+
+    private int processMainRecords(XSSFWorkbook workbook, Sheet sheet) {
+        List<ReportRecord> records = loadRecords(dtpckStart.getValue(), dtpckEnd.getValue(), false);
+        int rowNum = 2;
+        int hoursERP = 0;
+        int hoursEAM = 0;
+        
+        for (ReportRecord r : records) {
+            if (shouldSkipRecord(r)) {
+                continue;
+            }
+            
+            if (isEAMRecord(r)) {
+                hoursEAM += r.totals();
+            } else {
+                hoursERP += r.totals();
+            }
+            putReportRecord(workbook, sheet, r, rowNum++);
+        }
+        
+        rowNum += 2;
+        putKNZPTotals(workbook, sheet, hoursERP, hoursEAM, costERP, costEAM, rowNum++);
+        return rowNum;
+    }
+
+    private boolean shouldSkipRecord(ReportRecord repRec) {
+        return repRec.taskName().startsWith("SAP") || repRec.taskName().startsWith("САП");
+    }
+
+    private boolean isEAMRecord(ReportRecord repRec) {
+        return repRec.taskName().startsWith("EAM") || repRec.taskName().startsWith("ЕАМ");
+    }
+
+    private int processRNTRecords(XSSFWorkbook workbook, Sheet sheet, int rowNum) {
+        List<ReportRecord> records = loadRecords(dtpckStart.getValue(), dtpckEnd.getValue(), true);
+        
+        if (!records.isEmpty()) {
+            rowNum += 4;
+            Map<String, Integer> hrsByCat = calculateHoursByCategory(records);
+            rowNum = putRNTTotals(workbook, sheet, hrsByCat, rowNum) + 2;
+            
+            for (ReportRecord r : records) {
+                putReportRecord(workbook, sheet, r, rowNum++);
+            }
+        }
+        
+        return rowNum;
+    }
+
+    private Map<String, Integer> calculateHoursByCategory(List<ReportRecord> records) {
+        Map<String, Integer> hrsByCat = new HashMap<>();
+        for (ReportRecord r : records) {
+            hrsByCat.merge(r.userCategory(), r.totals(), Integer::sum);
+        }
+        return hrsByCat;
+    }
+
+    private void saveAndOpenWorkbook(XSSFWorkbook workbook) {
+        String fileLocation = lblOutputDir.getText() + "\\" + tfOutputFileName.getText();
+        try {
+            FileOutputStream outputStream = new FileOutputStream(fileLocation);
+            workbook.write(outputStream);
+            workbook.close();
+            Desktop.getDesktop().open(new File(fileLocation));
+        } catch (IOException e) {
+            Utils.showErrorAndStack(e);
+        }
     }
 
     private List<ReportRecord> loadRecords(LocalDate dtStart, LocalDate dtEnd, boolean showRNT) {
