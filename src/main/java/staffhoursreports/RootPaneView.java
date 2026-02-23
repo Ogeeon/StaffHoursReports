@@ -31,11 +31,14 @@ import java.time.format.FormatStyle;
 import java.util.Date;
 import java.util.List;
 import java.util.*;
+import java.util.function.BiConsumer;
 import java.util.prefs.Preferences;
 
 public class RootPaneView implements Initializable {
     private static final String ZI_SRC_FN_KEY = "zi_src_fn";
     private static final String ZI_DST_DIR_KEY = "zi_dst_dir";
+    private static final String MSG_EMPTY_FIELD = "Строка %d: пустое поле '%s', пропускаем запись";
+    private static final String MSG_EMPTY_DATE  = "Строка %d: пустое или некорректное поле 'Дата', пропускаем запись";
     private static final String HOURS_SQL =
         "select Users.FIO usrFIO, Tasks.taskName, hrt.totals, Tasks.CreationDate, Tasks.extRefNum" +
         ", Requesters.Organization, Requesters.FIO reqFIO, Users.category " +
@@ -177,145 +180,25 @@ public class RootPaneView implements Initializable {
                 List<String> messages = new ArrayList<>();
                 DecimalFormat decimalFormat = (DecimalFormat) NumberFormat.getIntegerInstance();
                 decimalFormat.setMinimumFractionDigits(0);
-                String taskName;
-                String executorFI;
-                Date creationDate;
-                String extRefNum;
-                String organization;
-                String requester;
                 try {
                     File file = new File(tfInputFileName.getText());
-                    FileInputStream fis = new FileInputStream(file);
-                    XSSFWorkbook wb = new XSSFWorkbook(fis);
-                    XSSFSheet sheet = wb.getSheetAt(0);
+                    try (FileInputStream fis = new FileInputStream(file);
+                         XSSFWorkbook wb = new XSSFWorkbook(fis)) {
+                        XSSFSheet sheet = wb.getSheetAt(0);
                     int totalRows = sheet.getLastRowNum();
                     if (totalRows < 2)
-                        return null;
+                        return new ArrayList<>();
                     else {
                         pbImport.setProgress(0);
                         hbProgress.setVisible(true);
                     }
                     for (Row row : sheet) {
                         try {
-                            taskName = getCellAsString(row.getCell(0));
-                            if (taskName == null || taskName.equals("Тема")) continue; // Заголовок таблицы пропускаем
-                            executorFI = getCellAsString(row.getCell(1));
-                            if (executorFI == null || executorFI.isEmpty()) {
-                                messages.add("Строка " + (row.getRowNum() + 1) + ": пустое поле 'Исполнитель', пропуск");
-                                continue;
-                            }
-                            creationDate = getCellAsDate(row.getCell(2));
-                            if (creationDate == null) {
-                                messages.add("Строка " + (row.getRowNum() + 1) + ": пустое или некорректное поле 'Дата', пропуск");
-                                continue;
-                            }
-                            extRefNum = getCellAsString(row.getCell(3));
-                            if (extRefNum == null || extRefNum.isEmpty()) {
-                                messages.add("Строка " + (row.getRowNum() + 1) + ": пустое поле '№ обращения', пропуск");
-                                continue;
-                            }
-                            requester = getCellAsString(row.getCell(4));
-                            if (requester == null || requester.isEmpty()) {
-                                messages.add("Строка " + (row.getRowNum() + 1) + ": пустое поле 'Заявитель', пропуск");
-                                continue;
-                            }
-                            organization = getCellAsString(row.getCell(5));
-                            if (organization == null || organization.isEmpty()) {
-                                messages.add("Строка " + (row.getRowNum() + 1) + ": пустое поле 'Организация', пропуск");
-                                continue;
-                            }
-                            Response r = getTask(extRefNum);
-                            if (r != null) {
-                                boolean updated = false;
-                                StringBuilder updates = new StringBuilder();
-
-                                // Check for task name change
-                                if (taskName != null && !taskName.isEmpty() && r.taskName() != null && !r.taskName().equals(taskName)) {
-                                    updates.append("название: '").append(r.taskName()).append("' -> '").append(taskName).append("'");
-                                    updated = true;
-                                }
-
-                                // Check for creation date change
-                                if (r.creationDate() != null && !r.creationDate().equals(creationDate)) {
-                                    if (updated) updates.append(", ");
-                                    String oldDate = Utils.toLocalDate(r.creationDate()).format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM));
-                                    String newDate = Utils.toLocalDate(creationDate).format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM));
-                                    updates.append("дата: ").append(oldDate).append(" -> ").append(newDate);
-                                    updated = true;
-                                }
-
-                                // Check for executor change
-                                if (!r.executor().equals(executorFI)) {
-                                    int executorId = getExecutorID(executorFI, messages);
-                                    if (executorId == 0) {
-                                        messages.add("Строка " + (row.getRowNum() + 1) + ": не удалось определить исполнителя: " + executorFI + ", пропуск записи");
-                                        continue;
-                                    }
-                                    try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET executor_id=? WHERE id=?")) {
-                                        pstmt.setInt(1, executorId);
-                                        pstmt.setInt(2, r.taskId());
-                                        int ur = pstmt.executeUpdate();
-                                        if (ur == 1) {
-                                            if (updated) updates.append(", ");
-                                            updates.append("исполнитель: ").append(executorFI);
-                                            updated = true;
-                                        }
-                                    }
-                                }
-
-                                // Check for requester
-                                if (r.requesterId() == 0) {
-                                    int rid = getRequesterID(requester, organization, messages);
-                                    if (rid == 0) {
-                                        if (updated) {
-                                            messages.add("Обновлена задача " + extRefNum + ": " + updates.toString());
-                                        }
-                                        updateProgress(row.getRowNum(), totalRows);
-                                        continue;
-                                    }
-                                    try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET requester_id=? WHERE id=?")) {
-                                        pstmt.setInt(1, rid);
-                                        pstmt.setInt(2, r.taskId());
-                                        int ur = pstmt.executeUpdate();
-                                        if (ur == 1) {
-                                            if (updated) updates.append(", ");
-                                            updates.append("id заявителя: ").append(rid);
-                                            updated = true;
-                                        }
-                                    }
-                                }
-
-                                // Update task name and/or date if they changed
-                                if (taskName != null && !taskName.isEmpty() && r.taskName() != null && !r.taskName().equals(taskName)) {
-                                    try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET taskName=? WHERE id=?")) {
-                                        pstmt.setString(1, taskName);
-                                        pstmt.setInt(2, r.taskId());
-                                        pstmt.executeUpdate();
-                                    }
-                                }
-                                if (r.creationDate() != null && !r.creationDate().equals(creationDate)) {
-                                    try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET creationDate=? WHERE id=?")) {
-                                        pstmt.setDate(1, new java.sql.Date(creationDate.getTime()));
-                                        pstmt.setInt(2, r.taskId());
-                                        pstmt.executeUpdate();
-                                    }
-                                }
-
-                                if (updated) {
-                                    messages.add("Обновлена задача " + extRefNum + ": " + updates.toString());
-                                }
-                            } else {
-                                int rid = getRequesterID(requester, organization, messages);
-                                if (rid == 0) {
-                                    updateProgress(row.getRowNum(), totalRows);
-                                    continue;
-                                }
-                                insertTask(taskName, executorFI, creationDate, extRefNum, rid, messages);
-                            }
-                            updateProgress(row.getRowNum(), totalRows);
+                            processSheetRow(row, totalRows, messages, this::updateProgress);
                         } catch (SQLException e) {
                             messages.add("Ошибка при обработке строки " + (row.getRowNum() + 1) + ": " + e.getMessage());
                         }
+                    }
                     }
                 } catch(IOException e) {
                     messages.add("Критическая ошибка ввода-вывода: " + e.getMessage());
@@ -357,6 +240,127 @@ public class RootPaneView implements Initializable {
         });
         Thread th = new Thread(task);
         th.start();
+    }
+
+    private void processSheetRow(Row row, int totalRows, List<String> messages,
+            BiConsumer<Long, Long> progressUpdater) throws SQLException {
+        String taskName = getCellAsString(row.getCell(0));
+        if (taskName == null || taskName.equals("Тема")) return; // Заголовок таблицы пропускаем
+        String executorFI = getCellAsString(row.getCell(1));
+        if (executorFI == null || executorFI.isEmpty()) {
+            messages.add(String.format(MSG_EMPTY_FIELD, row.getRowNum() + 1, "Исполнитель"));
+            return;
+        }
+        Date creationDate = getCellAsDate(row.getCell(2));
+        if (creationDate == null) {
+            messages.add(String.format(MSG_EMPTY_DATE, row.getRowNum() + 1));
+            return;
+        }
+        String extRefNum = getCellAsString(row.getCell(3));
+        if (extRefNum == null || extRefNum.isEmpty()) {
+            messages.add(String.format(MSG_EMPTY_FIELD, row.getRowNum() + 1, "№ обращения"));
+            return;
+        }
+        String requester = getCellAsString(row.getCell(4));
+        if (requester == null || requester.isEmpty()) {
+            messages.add(String.format(MSG_EMPTY_FIELD, row.getRowNum() + 1, "Заявитель"));
+            return;
+        }
+        String organization = getCellAsString(row.getCell(5));
+        if (organization == null || organization.isEmpty()) {
+            messages.add(String.format(MSG_EMPTY_FIELD, row.getRowNum() + 1, "Организация"));
+            return;
+        }
+        Response r = getTask(extRefNum);
+        if (r != null) {
+            boolean updated = false;
+            StringBuilder updates = new StringBuilder();
+
+            // Check for task name change
+            if (hasTaskNameChanged(taskName, r)) {
+                updates.append("название: '").append(r.taskName()).append("' -> '").append(taskName).append("'");
+                updated = true;
+            }
+
+            // Check for creation date change
+            boolean creationDateChanged = r.creationDate() != null && !r.creationDate().equals(creationDate);
+            if (creationDateChanged) {
+                if (updated) updates.append(", ");
+                String oldDate = Utils.toLocalDate(r.creationDate()).format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM));
+                String newDate = Utils.toLocalDate(creationDate).format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM));
+                updates.append("дата: ").append(oldDate).append(" -> ").append(newDate);
+                updated = true;
+            }
+
+            // Check for executor change
+            if (!r.executor().equals(executorFI)) {
+                int executorId = getExecutorID(executorFI, messages);
+                if (executorId == 0) {
+                    messages.add("Строка " + (row.getRowNum() + 1) + ": не удалось определить исполнителя: " + executorFI + ", пропускаем запись");
+                    return;
+                }
+                try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET executor_id=? WHERE id=?")) {
+                    pstmt.setInt(1, executorId);
+                    pstmt.setInt(2, r.taskId());
+                    int ur = pstmt.executeUpdate();
+                    if (ur == 1) {
+                        if (updated) updates.append(", ");
+                        updates.append("исполнитель: ").append(executorFI);
+                        updated = true;
+                    }
+                }
+            }
+
+            // Check for requester
+            if (r.requesterId() == 0) {
+                int rid = getRequesterID(requester, organization, messages);
+                if (rid == 0) {
+                    if (updated) {
+                        messages.add("Обновлена задача " + extRefNum + ": " + updates.toString());
+                    }
+                    progressUpdater.accept((long) row.getRowNum(), (long) totalRows);
+                    return;
+                }
+                try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET requester_id=? WHERE id=?")) {
+                    pstmt.setInt(1, rid);
+                    pstmt.setInt(2, r.taskId());
+                    int ur = pstmt.executeUpdate();
+                    if (ur == 1) {
+                        if (updated) updates.append(", ");
+                        updates.append("id заявителя: ").append(rid);
+                        updated = true;
+                    }
+                }
+            }
+
+            // Update task name and/or date if they changed
+            if (hasTaskNameChanged(taskName, r)) {
+                try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET taskName=? WHERE id=?")) {
+                    pstmt.setString(1, taskName);
+                    pstmt.setInt(2, r.taskId());
+                    pstmt.executeUpdate();
+                }
+            }
+            if (creationDateChanged) {
+                try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET creationDate=? WHERE id=?")) {
+                    pstmt.setDate(1, new java.sql.Date(creationDate.getTime()));
+                    pstmt.setInt(2, r.taskId());
+                    pstmt.executeUpdate();
+                }
+            }
+
+            if (updated) {
+                messages.add("Обновлена задача " + extRefNum + ": " + updates.toString());
+            }
+        } else {
+            int rid = getRequesterID(requester, organization, messages);
+            if (rid == 0) {
+                progressUpdater.accept((long) row.getRowNum(), (long) totalRows);
+                return;
+            }
+            insertTask(taskName, executorFI, creationDate, extRefNum, rid, messages);
+        }
+        progressUpdater.accept((long) row.getRowNum(), (long) totalRows);
     }
 
     private Response getTask(String extRefNum) throws SQLException {
@@ -649,6 +653,10 @@ public class RootPaneView implements Initializable {
 
         cell = row.createCell(6);
         cell.setCellValue(line.requesterName());
+    }
+
+    private boolean hasTaskNameChanged(String taskName, Response r) {
+        return taskName != null && !taskName.isEmpty() && r.taskName() != null && !r.taskName().equals(taskName);
     }
 
 }
