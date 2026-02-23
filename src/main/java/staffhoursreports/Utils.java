@@ -2,10 +2,6 @@ package staffhoursreports;
 
 import javafx.scene.control.Alert;
 import javafx.scene.control.Alert.AlertType;
-import javafx.scene.control.Button;
-import javafx.scene.control.ButtonBar;
-import javafx.scene.control.ButtonType;
-import javafx.scene.control.Hyperlink;
 import javafx.scene.control.Label;
 import javafx.scene.control.TextArea;
 import javafx.scene.layout.GridPane;
@@ -13,16 +9,19 @@ import javafx.scene.layout.Priority;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.ZoneId;
-import java.time.temporal.TemporalAdjusters;
-import java.time.temporal.WeekFields;
+import java.time.format.DateTimeFormatter;
+import java.time.format.FormatStyle;
 import java.util.Date;
 import java.util.Locale;
-import java.util.Optional;
 
 public class Utils {
+
+    private Utils() {
+        // Utility class - prevent instantiation
+    }
+
     public static void showErrorAndStack(Exception e) {
         Alert alert = new Alert(AlertType.ERROR);
         alert.setTitle("Error");
@@ -84,22 +83,6 @@ public class Utils {
         alert.getDialogPane().setPrefWidth(800);
         alert.getDialogPane().setMinWidth(600);
 
-        // Localize the "Show Details" hyperlink
-        alert.getDialogPane().expandedProperty().addListener((observable, wasExpanded, isExpanded) -> {
-            Hyperlink detailsLink = (Hyperlink) alert.getDialogPane().lookup(".hyperlink");
-            if (detailsLink != null) {
-                detailsLink.setText(isExpanded ? "Скрыть детали" : "Показать детали");
-            }
-        });
-
-        // Set initial hyperlink text before showing
-        alert.setOnShown(event -> {
-            Hyperlink detailsLink = (Hyperlink) alert.getDialogPane().lookup(".hyperlink");
-            if (detailsLink != null && detailsLink.getText().contains("Details")) {
-                detailsLink.setText("Показать детали");
-            }
-        });
-
         alert.showAndWait();
     }
 
@@ -109,6 +92,18 @@ public class Utils {
     
     public static Date fromLocalDate(LocalDate input) {
         return input == null ? null : Date.from(input.atStartOfDay(ZoneId.systemDefault()).toInstant());
+    }
+
+    public static String localizeDate(LocalDate date, Locale locale) {
+        DateTimeFormatter formatter = DateTimeFormatter.ofLocalizedDate(FormatStyle.LONG).withLocale(locale);
+        return formatter.format(date);
+    }
+
+    public static String getReportName(LocalDate dt1, LocalDate dt2) {
+        return "Отчет по ЗИ за период с " + localizeDate(dt1, Locale.getDefault()) +
+                " по " +
+                localizeDate(dt2, Locale.getDefault()) +
+                ".xlsx";
     }
 
 }

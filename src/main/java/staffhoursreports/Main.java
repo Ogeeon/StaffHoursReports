@@ -16,9 +16,11 @@ public class Main extends Application {
     public void start(Stage primaryStage) throws Exception{
         FXMLLoader loader = new FXMLLoader(getClass().getResource("/RootPane.fxml"));
         Scene scene = new Scene(loader.load());
-//        scene.getStylesheets().add("styles.css");
         try {
-            primaryStage.getIcons().add(new Image(getClass().getResource("/StaffHoursReports.png").toExternalForm()));
+            var iconResource = getClass().getResource("/StaffHoursReports.png");
+            if (iconResource != null) {
+                primaryStage.getIcons().add(new Image(iconResource.toExternalForm()));
+            }
         } catch (Exception e) {
             System.out.println("Failed to load application icon: " + e.getMessage());
         }

@@ -34,51 +34,21 @@ import java.util.*;
 import java.util.prefs.Preferences;
 
 public class RootPaneView implements Initializable {
-    private static class Response {
-        public final Integer taskId;
-        public final String extRefNum;
-        public final String executor;
-        public final Integer executorId;
-        public final Integer requesterId;
-        public final String taskName;
-        public final Date creationDate;
-
-        public Response(Integer taskId, String extRefNum, String executor, Integer executorId, Integer requesterId, String taskName, Date creationDate) {
-            this.taskId = taskId;
-            this.extRefNum = extRefNum;
-            this.executor = executor;
-            this.executorId = executorId;
-            this.requesterId = requesterId;
-            this.taskName = taskName;
-            this.creationDate = creationDate;
-        }
-
+    private record Response(
+        Integer taskId, String extRefNum, String executor,
+        Integer executorId, Integer requesterId,
+        String taskName, Date creationDate
+    ) {
         @Override
         public String toString() {
-            return "[" + taskId + ", " + extRefNum + ", " + requesterId + "]";
+            return "[" + taskId() + ", " + extRefNum() + ", " + requesterId() + "]";
         }
     }
-    private static class ReportRecord {
-        public final String userFIO;
-        public final String taskName;
-        public final int totals;
-        public final LocalDate creationDate;
-        public final String extRefNum;
-        public final String requesterName;
-        public final String requesterOrg;
-        public final String userCategory;
-
-        private ReportRecord(String userFIO, String taskName, int totals, LocalDate creationDate, String extRefNum, String requesterOrg, String requesterName, String userCategory) {
-            this.userFIO = userFIO;
-            this.taskName = taskName;
-            this.totals = totals;
-            this.creationDate = creationDate;
-            this.extRefNum = extRefNum;
-            this.requesterOrg = requesterOrg;
-            this.requesterName = requesterName;
-            this.userCategory = userCategory;
-        }
-    }
+    private record ReportRecord(
+        String userFIO, String taskName, int totals,
+        LocalDate creationDate, String extRefNum,
+        String requesterOrg, String requesterName, String userCategory
+    ) {}
     Connection connection = null;
     private final FileChooser fileChooser = new FileChooser();
     private final Preferences preferences = Preferences.userNodeForPackage(RootPaneView.class);
@@ -130,75 +100,15 @@ public class RootPaneView implements Initializable {
         rates.put("К1", ConfigFactory.load().getDouble("costs.k1"));
     }
 
-    /**
-     * Безопасно читает значение ячейки как строку, обрабатывая разные типы данных
-     */
     private String getCellAsString(Cell cell) {
-        if (cell == null) {
-            return "";
-        }
-        switch (cell.getCellType()) {
-            case STRING:
-                return cell.getStringCellValue().trim();
-            case NUMERIC:
-                if (DateUtil.isCellDateFormatted(cell)) {
-                    return cell.getDateCellValue().toString();
-                } else {
-                    // Убираем дробную часть, если число целое
-                    double numValue = cell.getNumericCellValue();
-                    if (numValue == (long) numValue) {
-                        return String.valueOf((long) numValue);
-                    } else {
-                        return String.valueOf(numValue);
-                    }
-                }
-            case BOOLEAN:
-                return String.valueOf(cell.getBooleanCellValue());
-            case FORMULA:
-                try {
-                    return cell.getStringCellValue().trim();
-                } catch (Exception e) {
-                    return String.valueOf(cell.getNumericCellValue());
-                }
-            case BLANK:
-                return "";
-            default:
-                return "";
-        }
+        return ExcelUtils.getCellAsString(cell);
     }
 
-    /**
-     * Безопасно читает значение ячейки как дату
-     */
     private Date getCellAsDate(Cell cell) {
-        if (cell == null) {
-            return null;
-        }
-        if (cell.getCellType() == CellType.NUMERIC && DateUtil.isCellDateFormatted(cell)) {
-            return cell.getDateCellValue();
-        }
-        if (cell.getCellType() == CellType.STRING) {
-            String strValue = cell.getStringCellValue().trim();
-            if (!strValue.isEmpty()) {
-                // Попытка распарсить строку как дату
-                try {
-                    return java.sql.Date.valueOf(strValue);
-                } catch (IllegalArgumentException e) {
-                    // Не удалось распарсить как дату
-                    return null;
-                }
-            }
-        }
-        return null;
+        return ExcelUtils.getCellAsDate(cell);
     }
 
     public boolean connect() {
-        try {
-            Class.forName("oracle.jdbc.driver.OracleDriver");
-        } catch (ClassNotFoundException e) {
-            Utils.showErrorAndStack(e);
-            return false;
-        }
         try {
             Locale.setDefault(Locale.ENGLISH);
             String host = System.getenv("STAFFHOURS_DB_HOST");
@@ -209,10 +119,6 @@ public class RootPaneView implements Initializable {
             connection = DriverManager.getConnection(connStr, login, password);
         } catch (SQLException e) {
             Utils.showErrorAndStack(e);
-            return false;
-        }
-        if (connection == null) {
-            Utils.showError("Не удалось подключиться к БД.");
             return false;
         }
         return true;
@@ -301,22 +207,22 @@ public class RootPaneView implements Initializable {
                                 StringBuilder updates = new StringBuilder();
 
                                 // Check for task name change
-                                if (taskName != null && !taskName.isEmpty() && r.taskName != null && !r.taskName.equals(taskName)) {
-                                    updates.append("название: '").append(r.taskName).append("' -> '").append(taskName).append("'");
+                                if (taskName != null && !taskName.isEmpty() && r.taskName() != null && !r.taskName().equals(taskName)) {
+                                    updates.append("название: '").append(r.taskName()).append("' -> '").append(taskName).append("'");
                                     updated = true;
                                 }
 
                                 // Check for creation date change
-                                if (r.creationDate != null && !r.creationDate.equals(creationDate)) {
+                                if (r.creationDate() != null && !r.creationDate().equals(creationDate)) {
                                     if (updated) updates.append(", ");
-                                    String oldDate = Utils.toLocalDate(r.creationDate).format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM));
+                                    String oldDate = Utils.toLocalDate(r.creationDate()).format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM));
                                     String newDate = Utils.toLocalDate(creationDate).format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM));
                                     updates.append("дата: ").append(oldDate).append(" -> ").append(newDate);
                                     updated = true;
                                 }
 
                                 // Check for executor change
-                                if (!r.executor.equals(executorFI)) {
+                                if (!r.executor().equals(executorFI)) {
                                     int executorId = getExecutorID(executorFI, messages);
                                     if (executorId == 0) {
                                         messages.add("Строка " + (row.getRowNum() + 1) + ": не удалось определить исполнителя: " + executorFI + ", пропуск записи");
@@ -324,7 +230,7 @@ public class RootPaneView implements Initializable {
                                     }
                                     try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET executor_id=? WHERE id=?")) {
                                         pstmt.setInt(1, executorId);
-                                        pstmt.setInt(2, r.taskId);
+                                        pstmt.setInt(2, r.taskId());
                                         int ur = pstmt.executeUpdate();
                                         if (ur == 1) {
                                             if (updated) updates.append(", ");
@@ -335,7 +241,7 @@ public class RootPaneView implements Initializable {
                                 }
 
                                 // Check for requester
-                                if (r.requesterId == 0) {
+                                if (r.requesterId() == 0) {
                                     int rid = getRequesterID(requester, organization, messages);
                                     if (rid == 0) {
                                         if (updated) {
@@ -346,7 +252,7 @@ public class RootPaneView implements Initializable {
                                     }
                                     try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET requester_id=? WHERE id=?")) {
                                         pstmt.setInt(1, rid);
-                                        pstmt.setInt(2, r.taskId);
+                                        pstmt.setInt(2, r.taskId());
                                         int ur = pstmt.executeUpdate();
                                         if (ur == 1) {
                                             if (updated) updates.append(", ");
@@ -357,17 +263,17 @@ public class RootPaneView implements Initializable {
                                 }
 
                                 // Update task name and/or date if they changed
-                                if (taskName != null && !taskName.isEmpty() && r.taskName != null && !r.taskName.equals(taskName)) {
+                                if (taskName != null && !taskName.isEmpty() && r.taskName() != null && !r.taskName().equals(taskName)) {
                                     try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET taskName=? WHERE id=?")) {
                                         pstmt.setString(1, taskName);
-                                        pstmt.setInt(2, r.taskId);
+                                        pstmt.setInt(2, r.taskId());
                                         pstmt.executeUpdate();
                                     }
                                 }
-                                if (r.creationDate != null && !r.creationDate.equals(creationDate)) {
+                                if (r.creationDate() != null && !r.creationDate().equals(creationDate)) {
                                     try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET creationDate=? WHERE id=?")) {
                                         pstmt.setDate(1, new java.sql.Date(creationDate.getTime()));
-                                        pstmt.setInt(2, r.taskId);
+                                        pstmt.setInt(2, r.taskId());
                                         pstmt.executeUpdate();
                                     }
                                 }
@@ -538,16 +444,8 @@ public class RootPaneView implements Initializable {
         tfOutputFileName.setText(getReportName(dtpckStart.getValue(), dtpckEnd.getValue()));
     }
 
-    private static String localizeDate(LocalDate date, Locale locale) {
-        DateTimeFormatter formatter = DateTimeFormatter.ofLocalizedDate(FormatStyle.LONG).withLocale(locale);
-        return formatter.format(date);
-    }
-
     private static String getReportName(LocalDate dt1, LocalDate dt2) {
-        return "Отчет по ЗИ за период с " + localizeDate(dt1, Locale.getDefault()) +
-                " по " +
-                localizeDate(dt2, Locale.getDefault()) +
-                ".xlsx";
+        return Utils.getReportName(dt1, dt2);
     }
 
     @FXML
@@ -583,12 +481,12 @@ public class RootPaneView implements Initializable {
         int hoursERP = 0;
         int hoursEAM = 0;
         for (ReportRecord r: records) {
-            if (r.taskName.startsWith("SAP") || r.taskName.startsWith("САП"))
+            if (r.taskName().startsWith("SAP") || r.taskName().startsWith("САП"))
                 continue;
-            if (r.taskName.startsWith("EAM") || r.taskName.startsWith("ЕАМ"))
-                hoursEAM += r.totals;
+            if (r.taskName().startsWith("EAM") || r.taskName().startsWith("ЕАМ"))
+                hoursEAM += r.totals();
             else
-                hoursERP += r.totals;
+                hoursERP += r.totals();
             putReportRecord(workbook, sheet, r, rowNum++);
         }
         rowNum += 2;
@@ -599,10 +497,10 @@ public class RootPaneView implements Initializable {
             rowNum += 4;
             Map<String, Integer> hrsByCat = new HashMap<>();
             for (ReportRecord r: records) {
-                if (hrsByCat.containsKey(r.userCategory)) {
-                    hrsByCat.put(r.userCategory, hrsByCat.get(r.userCategory) + r.totals);
+                if (hrsByCat.containsKey(r.userCategory())) {
+                    hrsByCat.put(r.userCategory(), hrsByCat.get(r.userCategory()) + r.totals());
                 } else {
-                    hrsByCat.put(r.userCategory, r.totals);
+                    hrsByCat.put(r.userCategory(), r.totals());
                 }
             }
             rowNum = putRNTTotals(workbook, sheet, hrsByCat, rowNum) + 2;
@@ -718,28 +616,28 @@ public class RootPaneView implements Initializable {
         CreationHelper createHelper = workbook.getCreationHelper();
         Row row = sheet.createRow(rowNum);
         Cell cell = row.createCell(0);
-        cell.setCellValue(line.userFIO);
+        cell.setCellValue(line.userFIO());
 
         cell = row.createCell(1);
-        cell.setCellValue(line.extRefNum);
+        cell.setCellValue(line.extRefNum());
 
         cell = row.createCell(2);
-        cell.setCellValue(line.taskName);
+        cell.setCellValue(line.taskName());
 
         cell = row.createCell(3);
-        cell.setCellValue(line.totals);
+        cell.setCellValue(line.totals());
 
         cell = row.createCell(4);
         CellStyle cellStyle = workbook.createCellStyle();
         cellStyle.setDataFormat(createHelper.createDataFormat().getFormat("m/d/yy"));
         cell.setCellStyle(cellStyle);
-        cell.setCellValue(Utils.fromLocalDate(line.creationDate));
+        cell.setCellValue(Utils.fromLocalDate(line.creationDate()));
 
         cell = row.createCell(5);
-        cell.setCellValue(line.requesterOrg);
+        cell.setCellValue(line.requesterOrg());
 
         cell = row.createCell(6);
-        cell.setCellValue(line.requesterName);
+        cell.setCellValue(line.requesterName());
     }
 
     private void putKNZPTotals(XSSFWorkbook workbook, Sheet sheet, int totalERP, int totalEAM, double costERP, double costEAM, int rowNum) {
