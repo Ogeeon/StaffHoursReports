@@ -36,7 +36,28 @@ import java.util.prefs.Preferences;
 public class RootPaneView implements Initializable {
     private static final String ZI_SRC_FN_KEY = "zi_src_fn";
     private static final String ZI_DST_DIR_KEY = "zi_dst_dir";
-    private static final String HOURS_SQL = buildHoursSql();
+    private static final String HOURS_SQL =
+        "select Users.FIO usrFIO, Tasks.taskName, hrt.totals, Tasks.CreationDate, Tasks.extRefNum" +
+        ", Requesters.Organization, Requesters.FIO reqFIO, Users.category " +
+        "from (" +
+            "select User_id, Task_id, sum(hr) totals " +
+            "from (" +
+                "select User_id, Task_id, hr, dat " +
+                "from TSRecordViews " +
+                "unpivot ((hr, dat) for day in (" +
+                    "(hr1, dat1) as '1', (hr2, dat2) as '2', (hr3, dat3) as '3', " +
+                    "(hr4, dat4) as '4', (hr5, dat5) as '5', (hr6, dat6) as '6', " +
+                    "(hr7, dat7) as '7'" +
+                "))" +
+            ") " +
+            "where ? <= dat and dat <= ? and hr > 0 " +
+            "group by User_id, Task_id" +
+        ") hrt " +
+        "left join Tasks on (Tasks.id=hrt.Task_id) " +
+        "left join Users on (Users.id=hrt.User_id) " +
+        "left join Requesters on (Requesters.id = tasks.requester_id) " +
+        "WHERE Tasks.taskName %sLIKE 'РН-Транс%%' " +
+        "ORDER BY 1, 2";
     private record Response(
         Integer taskId, String extRefNum, String executor,
         Integer executorId, Integer requesterId,
@@ -578,10 +599,8 @@ public class RootPaneView implements Initializable {
         java.sql.Date sqlStart = java.sql.Date.valueOf(dtStart);
         java.sql.Date sqlEnd   = java.sql.Date.valueOf(dtEnd);
         try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
-            for (int i = 1; i <= 7; i++) {
-                pstmt.setDate(2 * i - 1, sqlStart);
-                pstmt.setDate(2 * i,     sqlEnd);
-            }
+            pstmt.setDate(1, sqlStart);
+            pstmt.setDate(2, sqlEnd);
             try (ResultSet rs = pstmt.executeQuery()) {
                 while (rs.next()) {
                     result.add(new ReportRecord(
@@ -600,36 +619,6 @@ public class RootPaneView implements Initializable {
             Utils.showErrorAndStack(e);
         }
         return result;
-    }
-
-    private static String buildHoursSql() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("select Users.FIO usrFIO, Tasks.taskName, hrt.totals, Tasks.CreationDate, Tasks.extRefNum")
-          .append(", Requesters.Organization, Requesters.FIO reqFIO, Users.category ")
-          .append("from (")
-          .append("select User_id, Task_id, sum(sumhr) totals ")
-          .append("from (");
-        for (int i = 1; i <= 7; i++) {
-            String h = "hr" + i;
-            String d = "dat" + i;
-            sb.append("select User_id, Task_id, sum(").append(h).append(") sumhr ")
-              .append("from TSRecordViews where ")
-              .append("? <= ").append(d)
-              .append(" AND ").append(d).append(" <= ? ")
-              .append("AND ").append(h).append(" > 0 ")
-              .append("group by User_id, Task_id");
-            if (i < 7)
-                sb.append(" union all\n");
-        }
-        sb.append(") hrs ")
-          .append("group by hrs.User_id, hrs.Task_id")
-          .append(") hrt ")
-          .append("left join Tasks on (Tasks.id=hrt.Task_id) ")
-          .append("left join Users on (Users.id=hrt.User_id) ")
-          .append("left join Requesters on (Requesters.id = tasks.requester_id) ")
-          .append("WHERE Tasks.taskName %sLIKE 'РН-Транс%%' ")
-          .append("ORDER BY 1, 2");
-        return sb.toString();
     }
 
     private void putReportRecord(XSSFWorkbook workbook, Sheet sheet, ReportRecord line, int rowNum) {
