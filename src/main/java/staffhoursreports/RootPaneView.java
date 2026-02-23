@@ -34,6 +34,9 @@ import java.util.*;
 import java.util.prefs.Preferences;
 
 public class RootPaneView implements Initializable {
+    private static final String ZI_SRC_FN_KEY = "zi_src_fn";
+    private static final String ZI_DST_DIR_KEY = "zi_dst_dir";
+    private static final String HOURS_SQL = buildHoursSql();
     private record Response(
         Integer taskId, String extRefNum, String executor,
         Integer executorId, Integer requesterId,
@@ -81,8 +84,8 @@ public class RootPaneView implements Initializable {
     public void initialize(URL location, ResourceBundle resources) {
         accordion.setExpandedPane(tpImport);
         fileChooser.getExtensionFilters().addAll(new FileChooser.ExtensionFilter("Файлы Excel", "*.xlsx"));
-        tfInputFileName.setText(preferences.get("zi_src_fn", "i:\\УИТ\\ОП\\_Регламентная отчетность\\Отчет по ЗИ\\ЗИ_2020-КНПЗ.xlsx"));
-        lblOutputDir.setText(preferences.get("zi_dst_dir", "i:\\УИТ\\ОП\\_Регламентная отчетность\\Отчет по ЗИ"));
+        tfInputFileName.setText(preferences.get(ZI_SRC_FN_KEY, "i:\\УИТ\\ОП\\_Регламентная отчетность\\Отчет по ЗИ\\ЗИ_2020-КНПЗ.xlsx"));
+        lblOutputDir.setText(preferences.get(ZI_DST_DIR_KEY, "i:\\УИТ\\ОП\\_Регламентная отчетность\\Отчет по ЗИ"));
         LocalDate currDate = LocalDate.now();
         if (currDate.getDayOfMonth() < 16)
             currDate = currDate.minusMonths(1);
@@ -128,20 +131,20 @@ public class RootPaneView implements Initializable {
     private void handleBrowseSrcClick() {
         Stage root = ((Stage) topPane.getScene().getWindow());
         fileChooser.setTitle("Открыть отчёт по ЗИ");
-        String srcFn = preferences.get("zi_src_fn", "");
+        String srcFn = preferences.get(ZI_SRC_FN_KEY, "");
         if (!srcFn.isEmpty()) {
             fileChooser.setInitialDirectory((new File(srcFn)).getParentFile());
         }
         File source = fileChooser.showOpenDialog(root);
         if (source != null) {
             tfInputFileName.setText(source.getPath());
-            preferences.put("zi_src_fn", source.getPath());
+            preferences.put(ZI_SRC_FN_KEY, source.getPath());
         }
     }
 
     @FXML
     private void handleImportClick() {
-        if (tfInputFileName.getText().length() == 0) {
+        if (tfInputFileName.getText().isEmpty()) {
             Alert alert = new Alert(Alert.AlertType.ERROR);
             alert.setHeaderText("Не выбран файл.");
             alert.setTitle("Ошибка");
@@ -427,14 +430,14 @@ public class RootPaneView implements Initializable {
     private void handleBrowseDstClick() {
         Stage root = ((Stage) topPane.getScene().getWindow());
         fileChooser.setTitle("Сохранить отчёт о трудозатратах");
-        String dstDir = preferences.get("zi_dst_dir", "");
+        String dstDir = preferences.get(ZI_DST_DIR_KEY, "");
         if (!dstDir.isEmpty()) {
             fileChooser.setInitialDirectory((new File(dstDir)));
         }
         File dest = fileChooser.showSaveDialog(root);
         if (dest != null) {
             lblOutputDir.setText(dest.getParentFile().getPath());
-            preferences.put("zi_dst_dir", dest.getParentFile().getPath());
+            preferences.put(ZI_DST_DIR_KEY, dest.getParentFile().getPath());
             tfOutputFileName.setText(dest.getName());
         }
     }
@@ -450,7 +453,7 @@ public class RootPaneView implements Initializable {
 
     @FXML
     private void handleGenerateReportClick() {
-        File dstFile = new File(lblOutputDir.getText() + "\\" + tfOutputFileName.getText());
+        File dstFile = new File(lblOutputDir.getText(), tfOutputFileName.getText());
         if (dstFile.exists()) {
             Alert alert = new Alert(Alert.AlertType.WARNING);
             alert.setTitle("Подтверждение");
@@ -571,45 +574,62 @@ public class RootPaneView implements Initializable {
 
     private List<ReportRecord> loadRecords(LocalDate dtStart, LocalDate dtEnd, boolean showRNT) {
         List<ReportRecord> result = new ArrayList<>();
-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
-        try {
-            Statement stmt = connection.createStatement();
-            StringBuilder sb = new StringBuilder();
-            String ds = String.format("TO_DATE('%s','YYYY-MM-DD')", formatter.format(dtStart));
-            String de = String.format("TO_DATE('%s','YYYY-MM-DD')", formatter.format(dtEnd));
-            sb.append("select Users.FIO usrFIO, Tasks.taskName, hrt.totals, Tasks.CreationDate, Tasks.extRefNum, Requesters.Organization, Requesters.FIO reqFIO, Users.category \n" +
-                    "from (\n" +
-                    "select User_id, Task_id, sum(sumhr) totals \n" +
-                    "from (");
-            String h, d;
+        String sql = String.format(HOURS_SQL, showRNT ? "" : "NOT ");
+        java.sql.Date sqlStart = java.sql.Date.valueOf(dtStart);
+        java.sql.Date sqlEnd   = java.sql.Date.valueOf(dtEnd);
+        try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
             for (int i = 1; i <= 7; i++) {
-                h = "hr" + i;
-                d = "dat" + i;
-                sb.append("select User_id, Task_id, sum(").append(h).append(") sumhr from TSRecordViews where ").append(ds).append(" <= ").append(d).append(" AND ").append(d).append(" <= ").append(de).append(" AND ").append(h).append(" > 0 group by User_id, Task_id ");
-                if (i < 7)
-                    sb.append("union all \n");
+                pstmt.setDate(2 * i - 1, sqlStart);
+                pstmt.setDate(2 * i,     sqlEnd);
             }
-            sb.append(") hrs\n" +
-                    "group by hrs.User_id, hrs.Task_id\n" +
-                    ") hrt\n" +
-                    "left join Tasks on (Tasks.id=hrt.Task_id)\n" +
-                    "left join Users on (Users.id=hrt.User_id)\n" +
-                    "left join Requesters on (Requesters.id = tasks.requester_id)");
-            sb.append("WHERE Tasks.taskName ").append(showRNT ? "" : "NOT ").append("LIKE 'РН-Транс%'\n" +
-                    "ORDER BY 1, 2");
-            try (ResultSet rs = stmt.executeQuery(sb.toString())) {
+            try (ResultSet rs = pstmt.executeQuery()) {
                 while (rs.next()) {
-                    result.add(new ReportRecord(rs.getString("usrFIO"),
-                            rs.getString("taskName"), rs.getInt("totals"), Utils.toLocalDate(rs.getTimestamp("CreationDate")),
-                            rs.getString("extRefNum"), rs.getString("Organization"),
-                            rs.getString("reqFIO"), rs.getString("category")));
+                    result.add(new ReportRecord(
+                        rs.getString("usrFIO"),
+                        rs.getString("taskName"),
+                        rs.getInt("totals"),
+                        Utils.toLocalDate(rs.getTimestamp("CreationDate")),
+                        rs.getString("extRefNum"),
+                        rs.getString("Organization"),
+                        rs.getString("reqFIO"),
+                        rs.getString("category")
+                    ));
                 }
             }
-            stmt.close();
         } catch (SQLException e) {
             Utils.showErrorAndStack(e);
         }
         return result;
+    }
+
+    private static String buildHoursSql() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("select Users.FIO usrFIO, Tasks.taskName, hrt.totals, Tasks.CreationDate, Tasks.extRefNum")
+          .append(", Requesters.Organization, Requesters.FIO reqFIO, Users.category ")
+          .append("from (")
+          .append("select User_id, Task_id, sum(sumhr) totals ")
+          .append("from (");
+        for (int i = 1; i <= 7; i++) {
+            String h = "hr" + i;
+            String d = "dat" + i;
+            sb.append("select User_id, Task_id, sum(").append(h).append(") sumhr ")
+              .append("from TSRecordViews where ")
+              .append("? <= ").append(d)
+              .append(" AND ").append(d).append(" <= ? ")
+              .append("AND ").append(h).append(" > 0 ")
+              .append("group by User_id, Task_id");
+            if (i < 7)
+                sb.append(" union all\n");
+        }
+        sb.append(") hrs ")
+          .append("group by hrs.User_id, hrs.Task_id")
+          .append(") hrt ")
+          .append("left join Tasks on (Tasks.id=hrt.Task_id) ")
+          .append("left join Users on (Users.id=hrt.User_id) ")
+          .append("left join Requesters on (Requesters.id = tasks.requester_id) ")
+          .append("WHERE Tasks.taskName %sLIKE 'РН-Транс%%' ")
+          .append("ORDER BY 1, 2");
+        return sb.toString();
     }
 
     private void putReportRecord(XSSFWorkbook workbook, Sheet sheet, ReportRecord line, int rowNum) {
