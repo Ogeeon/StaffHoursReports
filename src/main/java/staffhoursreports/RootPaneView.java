@@ -56,7 +56,6 @@ public class RootPaneView implements Initializable {
         "left join Tasks on (Tasks.id=hrt.Task_id) " +
         "left join Users on (Users.id=hrt.User_id) " +
         "left join Requesters on (Requesters.id = tasks.requester_id) " +
-        "WHERE Tasks.taskName %sLIKE 'РН-Транс%%' " +
         "ORDER BY 1, 2";
     private record Response(
         Integer taskId, String extRefNum, String executor,
@@ -486,8 +485,7 @@ public class RootPaneView implements Initializable {
         setupSheetColumns(sheet);
         
         putCaption(workbook, sheet);
-        int rowNum = processMainRecords(workbook, sheet);
-        processRNTRecords(workbook, sheet, rowNum);
+        processRecords(workbook, sheet);
         
         saveAndOpenWorkbook(workbook);
     }
@@ -570,60 +568,20 @@ public class RootPaneView implements Initializable {
         sheet.setColumnWidth(7, 9240);
     }
 
-    private int processMainRecords(XSSFWorkbook workbook, Sheet sheet) {
-        List<ReportRecord> records = loadRecords(dtpckStart.getValue(), dtpckEnd.getValue(), false);
+    private void processRecords(XSSFWorkbook workbook, Sheet sheet) {
+        List<ReportRecord> records = loadRecords(dtpckStart.getValue(), dtpckEnd.getValue());
         int rowNum = 2;
-        int hoursERP = 0;
-        int hoursEAM = 0;
         
         for (ReportRecord r : records) {
             if (shouldSkipRecord(r)) {
                 continue;
             }
-            
-            if (isEAMRecord(r)) {
-                hoursEAM += r.totals();
-            } else {
-                hoursERP += r.totals();
-            }
             putReportRecord(workbook, sheet, r, rowNum++);
         }
-        
-        rowNum += 2;
-        putKNZPTotals(workbook, sheet, hoursERP, hoursEAM, costERP, costEAM, rowNum++);
-        return rowNum;
     }
 
     private boolean shouldSkipRecord(ReportRecord repRec) {
         return repRec.taskName().startsWith("SAP") || repRec.taskName().startsWith("САП");
-    }
-
-    private boolean isEAMRecord(ReportRecord repRec) {
-        return repRec.taskName().startsWith("EAM") || repRec.taskName().startsWith("ЕАМ");
-    }
-
-    private int processRNTRecords(XSSFWorkbook workbook, Sheet sheet, int rowNum) {
-        List<ReportRecord> records = loadRecords(dtpckStart.getValue(), dtpckEnd.getValue(), true);
-        
-        if (!records.isEmpty()) {
-            rowNum += 4;
-            Map<String, Integer> hrsByCat = calculateHoursByCategory(records);
-            rowNum = putRNTTotals(workbook, sheet, hrsByCat, rowNum) + 2;
-            
-            for (ReportRecord r : records) {
-                putReportRecord(workbook, sheet, r, rowNum++);
-            }
-        }
-        
-        return rowNum;
-    }
-
-    private Map<String, Integer> calculateHoursByCategory(List<ReportRecord> records) {
-        Map<String, Integer> hrsByCat = new HashMap<>();
-        for (ReportRecord r : records) {
-            hrsByCat.merge(r.userCategory(), r.totals(), Integer::sum);
-        }
-        return hrsByCat;
     }
 
     private void saveAndOpenWorkbook(XSSFWorkbook workbook) {
@@ -638,12 +596,11 @@ public class RootPaneView implements Initializable {
         }
     }
 
-    private List<ReportRecord> loadRecords(LocalDate dtStart, LocalDate dtEnd, boolean showRNT) {
+    private List<ReportRecord> loadRecords(LocalDate dtStart, LocalDate dtEnd) {
         List<ReportRecord> result = new ArrayList<>();
-        String sql = String.format(HOURS_SQL, showRNT ? "" : "NOT ");
         java.sql.Date sqlStart = java.sql.Date.valueOf(dtStart);
         java.sql.Date sqlEnd   = java.sql.Date.valueOf(dtEnd);
-        try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
+        try (PreparedStatement pstmt = connection.prepareStatement(HOURS_SQL)) {
             pstmt.setDate(1, sqlStart);
             pstmt.setDate(2, sqlEnd);
             try (ResultSet rs = pstmt.executeQuery()) {
@@ -694,84 +651,4 @@ public class RootPaneView implements Initializable {
         cell.setCellValue(line.requesterName());
     }
 
-    private void putKNZPTotals(XSSFWorkbook workbook, Sheet sheet, int totalERP, int totalEAM, double costERP, double costEAM, int rowNum) {
-        CreationHelper createHelper = workbook.getCreationHelper();
-        XSSFRow xssfRowrow = ((XSSFSheet) sheet).createRow(rowNum);
-        XSSFCell xssfCellcell = xssfRowrow.createCell(0);
-        XSSFRichTextString rt = new XSSFRichTextString("Отчет по заявкам КНПЗ во вложении.");
-        XSSFFont font1 = workbook.createFont();
-        font1.setBold(true);
-        rt.applyFont(17, 21, font1);
-        xssfCellcell.setCellValue(rt);
-
-        Row row = sheet.createRow(++rowNum);
-        Cell cell = row.createCell(0);
-        cell.setCellValue("ERP");
-        cell = row.createCell(1);
-        cell.setCellValue(costERP);
-        cell = row.createCell(2);
-        cell.setCellValue(totalERP);
-        cell = row.createCell(3);
-        CellStyle cellStyle = workbook.createCellStyle();
-        cellStyle.setDataFormat(createHelper.createDataFormat().getFormat("# ##0.00"));
-        cell.setCellStyle(cellStyle);
-        String frm = "B%d*C%d";
-        cell.setCellFormula(String.format(frm, rowNum+1, rowNum+1));
-
-        row = sheet.createRow(++rowNum);
-        cell = row.createCell(0);
-        cell.setCellValue("EAM");
-        cell = row.createCell(1);
-        cell.setCellValue(costEAM);
-        cell = row.createCell(2);
-        cell.setCellValue(totalEAM);
-        cell = row.createCell(3);
-        cell.setCellStyle(cellStyle);
-        cell.setCellFormula(String.format(frm, rowNum+1, rowNum+1));
-
-        row = sheet.createRow(++rowNum);
-        cell = row.createCell(3);
-        cell.setCellStyle(cellStyle);
-        String frm2 = "D%d+D%d";
-        cell.setCellFormula(String.format(frm2, rowNum-1, rowNum));
-    }
-
-    private int putRNTTotals(XSSFWorkbook workbook, Sheet sheet, Map<String, Integer> hrsByCat, int rowNum) {
-        CreationHelper createHelper = workbook.getCreationHelper();
-        XSSFRow xssfRowrow = ((XSSFSheet) sheet).createRow(rowNum);
-        XSSFCell xssfCellcell = xssfRowrow.createCell(0);
-        XSSFRichTextString rt = new XSSFRichTextString("Было выполнено дополнительных работ по РН-Транс");
-        XSSFFont font1 = workbook.createFont();
-        font1.setBold(true);
-        rt.applyFont(39, 47, font1);
-        xssfCellcell.setCellValue(rt);
-
-        Row row;
-        Cell cell;
-        Set<String> keys = hrsByCat.keySet();
-        int startRN = rowNum;
-        for (String key: keys) {
-            row = sheet.createRow(++rowNum);
-            cell = row.createCell(0);
-            cell.setCellValue(key);
-            cell = row.createCell(1);
-            cell.setCellValue(rates.get(key));
-            cell = row.createCell(2);
-            cell.setCellValue(hrsByCat.get(key));
-            cell = row.createCell(3);
-            CellStyle cellStyle = workbook.createCellStyle();
-            cellStyle.setDataFormat(createHelper.createDataFormat().getFormat("# ##0.00"));
-            cell.setCellStyle(cellStyle);
-            String frm = "B%d*C%d";
-            cell.setCellFormula(String.format(frm, rowNum+1, rowNum+1));
-        }
-        row = sheet.createRow(++rowNum);
-        cell = row.createCell(3);
-        CellStyle cellStyle = workbook.createCellStyle();
-        cellStyle.setDataFormat(createHelper.createDataFormat().getFormat("# ##0.00"));
-        cell.setCellStyle(cellStyle);
-        String frm = "SUM(D%d:D%d)";
-        cell.setCellFormula(String.format(frm, startRN + 2, rowNum));
-        return rowNum;
-    }
 }
