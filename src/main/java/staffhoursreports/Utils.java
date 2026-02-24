@@ -87,7 +87,9 @@ public class Utils {
     }
 
     public static LocalDate toLocalDate(Date input) {
-        return input == null ? null : input.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+        if (input == null) return null;
+        if (input instanceof java.sql.Date sqlDate) return sqlDate.toLocalDate();
+        return input.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
     }
     
     public static Date fromLocalDate(LocalDate input) {
