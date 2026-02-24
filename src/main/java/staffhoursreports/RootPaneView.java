@@ -60,7 +60,7 @@ public class RootPaneView implements Initializable {
         "left join Users on (Users.id=hrt.User_id) " +
         "left join Requesters on (Requesters.id = tasks.requester_id) " +
         "ORDER BY 1, 2";
-    private record Response(
+    private record SavedTask(
         Integer taskId, String extRefNum, String executor,
         Integer executorId, Integer requesterId,
         String taskName, Date creationDate
@@ -271,29 +271,29 @@ public class RootPaneView implements Initializable {
             messages.add(String.format(MSG_EMPTY_FIELD, row.getRowNum() + 1, "Организация"));
             return;
         }
-        Response r = getTask(extRefNum);
-        if (r != null) {
+        SavedTask st = getTask(extRefNum);
+        if (st != null) {
             boolean updated = false;
             StringBuilder updates = new StringBuilder();
 
             // Check for task name change
-            if (hasTaskNameChanged(taskName, r)) {
-                updates.append("название: '").append(r.taskName()).append("' -> '").append(taskName).append("'");
+            if (hasTaskNameChanged(taskName, st)) {
+                updates.append("название: '").append(st.taskName()).append("' -> '").append(taskName).append("'");
                 updated = true;
             }
 
             // Check for creation date change
-            boolean creationDateChanged = r.creationDate() != null && !r.creationDate().equals(creationDate);
+            boolean creationDateChanged = st.creationDate() != null && !st.creationDate().equals(creationDate);
             if (creationDateChanged) {
                 if (updated) updates.append(", ");
-                String oldDate = Utils.toLocalDate(r.creationDate()).format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM));
+                String oldDate = Utils.toLocalDate(st.creationDate()).format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM));
                 String newDate = Utils.toLocalDate(creationDate).format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM));
                 updates.append("дата: ").append(oldDate).append(" -> ").append(newDate);
                 updated = true;
             }
 
             // Check for executor change
-            if (!r.executor().equals(executorFI)) {
+            if (!st.executor().equals(executorFI)) {
                 int executorId = getExecutorID(executorFI, messages);
                 if (executorId == 0) {
                     messages.add("Строка " + (row.getRowNum() + 1) + ": не удалось определить исполнителя: " + executorFI + ", пропускаем запись");
@@ -301,7 +301,7 @@ public class RootPaneView implements Initializable {
                 }
                 try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET executor_id=? WHERE id=?")) {
                     pstmt.setInt(1, executorId);
-                    pstmt.setInt(2, r.taskId());
+                    pstmt.setInt(2, st.taskId());
                     int ur = pstmt.executeUpdate();
                     if (ur == 1) {
                         if (updated) updates.append(", ");
@@ -312,7 +312,7 @@ public class RootPaneView implements Initializable {
             }
 
             // Check for requester
-            if (r.requesterId() == 0) {
+            if (st.requesterId() == 0) {
                 int rid = getRequesterID(requester, organization, messages);
                 if (rid == 0) {
                     if (updated) {
@@ -323,7 +323,7 @@ public class RootPaneView implements Initializable {
                 }
                 try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET requester_id=? WHERE id=?")) {
                     pstmt.setInt(1, rid);
-                    pstmt.setInt(2, r.taskId());
+                    pstmt.setInt(2, st.taskId());
                     int ur = pstmt.executeUpdate();
                     if (ur == 1) {
                         if (updated) updates.append(", ");
@@ -334,17 +334,17 @@ public class RootPaneView implements Initializable {
             }
 
             // Update task name and/or date if they changed
-            if (hasTaskNameChanged(taskName, r)) {
+            if (hasTaskNameChanged(taskName, st)) {
                 try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET taskName=? WHERE id=?")) {
                     pstmt.setString(1, taskName);
-                    pstmt.setInt(2, r.taskId());
+                    pstmt.setInt(2, st.taskId());
                     pstmt.executeUpdate();
                 }
             }
             if (creationDateChanged) {
                 try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET creationDate=? WHERE id=?")) {
                     pstmt.setDate(1, new java.sql.Date(creationDate.getTime()));
-                    pstmt.setInt(2, r.taskId());
+                    pstmt.setInt(2, st.taskId());
                     pstmt.executeUpdate();
                 }
             }
@@ -363,8 +363,8 @@ public class RootPaneView implements Initializable {
         progressUpdater.accept((long) row.getRowNum(), (long) totalRows);
     }
 
-    private Response getTask(String extRefNum) throws SQLException {
-        Response r = null;
+    private SavedTask getTask(String extRefNum) throws SQLException {
+        SavedTask st = null;
         try (PreparedStatement pstmt = connection.prepareStatement(
                 "SELECT t.id, t.executor_id, t.requester_id, u.fio, t.taskName, t.creationDate " +
                 "FROM Tasks t " +
@@ -373,12 +373,12 @@ public class RootPaneView implements Initializable {
             pstmt.setString(1, extRefNum);
             try (ResultSet rs = pstmt.executeQuery()) {
                 while (rs.next()) {
-                    r = new Response(rs.getInt("id"), extRefNum, rs.getString("fio"), rs.getInt("executor_id"),
+                    st = new SavedTask(rs.getInt("id"), extRefNum, rs.getString("fio"), rs.getInt("executor_id"),
                                     rs.getInt("requester_id"), rs.getString("taskName"), rs.getDate("creationDate"));
                 }
             }
         }
-        return r;
+        return st;
     }
 
     private void insertTask(String taskName, String executorFI, Date creationDate, String extRefNum, int requesterId, List<String> messages) throws SQLException {
@@ -655,8 +655,8 @@ public class RootPaneView implements Initializable {
         cell.setCellValue(line.requesterName());
     }
 
-    private boolean hasTaskNameChanged(String taskName, Response r) {
-        return taskName != null && !taskName.isEmpty() && r.taskName() != null && !r.taskName().equals(taskName);
+    private boolean hasTaskNameChanged(String taskName, SavedTask st) {
+        return taskName != null && !taskName.isEmpty() && st.taskName() != null && !st.taskName().equals(taskName);
     }
 
 }
