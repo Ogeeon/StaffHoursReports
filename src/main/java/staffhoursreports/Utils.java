@@ -102,9 +102,9 @@ public class Utils {
     }
 
     public static String getReportName(LocalDate dt1, LocalDate dt2) {
-        return "Отчет по ЗИ за период с " + localizeDate(dt1, Locale.getDefault()) +
+        return "Отчет по ЗИ за период с " + localizeDate(dt1, Locale.forLanguageTag("ru")) +
                 " по " +
-                localizeDate(dt2, Locale.getDefault()) +
+                localizeDate(dt2, Locale.forLanguageTag("ru")) +
                 ".xlsx";
     }
 

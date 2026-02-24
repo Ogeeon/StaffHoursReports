@@ -23,11 +23,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.URL;
 import java.sql.*;
-import java.text.DecimalFormat;
-import java.text.NumberFormat;
 import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
-import java.time.format.FormatStyle;
 import java.util.Date;
 import java.util.List;
 import java.util.*;
@@ -62,7 +58,7 @@ public class RootPaneView implements Initializable {
         "ORDER BY 1, 2";
     private record SavedTask(
         Integer taskId, String extRefNum, String executor,
-        Integer executorId, Integer requesterId,
+        Integer executorId, Integer requesterId, String requester,
         String taskName, Date creationDate
     ) {
         @Override
@@ -70,6 +66,10 @@ public class RootPaneView implements Initializable {
             return "[" + taskId() + ", " + extRefNum() + ", " + requesterId() + "]";
         }
     }
+    private record RowData(
+            String taskName, String executorFI, Date creationDate,
+            String extRefNum, String requester, String organization
+    ) {}
     private record ReportRecord(
         String userFIO, String taskName, int totals,
         LocalDate creationDate, String extRefNum,
@@ -79,8 +79,6 @@ public class RootPaneView implements Initializable {
     private final FileChooser fileChooser = new FileChooser();
     private final Preferences preferences = Preferences.userNodeForPackage(RootPaneView.class);
     private Map<String, Double> rates;
-    double costERP = 0;
-    double costEAM = 0;
 
     @FXML
     private BorderPane topPane;
@@ -117,8 +115,6 @@ public class RootPaneView implements Initializable {
         dtpckStart.setValue(dateFrom);
         dtpckEnd.setValue(dateTo);
         tfOutputFileName.setText(getReportName(dateFrom, dateTo));
-        costERP = ConfigFactory.load().getDouble("costs.erp");
-        costEAM = ConfigFactory.load().getDouble("costs.eam");
         rates = new HashMap<>();
         rates.put("К4", ConfigFactory.load().getDouble("costs.k4"));
         rates.put("К3", ConfigFactory.load().getDouble("costs.k3"));
@@ -174,207 +170,232 @@ public class RootPaneView implements Initializable {
             alert.showAndWait();
             return;
         }
-        Task<List<String>> task = new Task<List<String>>() {
+        Task<List<String>> task = new Task<>() {
             @Override
             protected List<String> call() throws ImportException {
-                List<String> messages = new ArrayList<>();
-                DecimalFormat decimalFormat = (DecimalFormat) NumberFormat.getIntegerInstance();
-                decimalFormat.setMinimumFractionDigits(0);
-                try {
-                    File file = new File(tfInputFileName.getText());
-                    try (FileInputStream fis = new FileInputStream(file);
-                         XSSFWorkbook wb = new XSSFWorkbook(fis)) {
-                        XSSFSheet sheet = wb.getSheetAt(0);
-                    int totalRows = sheet.getLastRowNum();
-                    if (totalRows < 2)
-                        return new ArrayList<>();
-                    else {
-                        pbImport.setProgress(0);
-                        hbProgress.setVisible(true);
-                    }
-                    for (Row row : sheet) {
-                        try {
-                            processSheetRow(row, totalRows, messages, this::updateProgress);
-                        } catch (SQLException e) {
-                            messages.add("Ошибка при обработке строки " + (row.getRowNum() + 1) + ": " + e.getMessage());
-                        }
-                    }
-                    }
-                } catch(IOException e) {
-                    messages.add("Критическая ошибка ввода-вывода: " + e.getMessage());
-                    throw new ImportException("IO error during import", e);
-                } catch(Exception e) {
-                    messages.add("Критическая ошибка: " + e.getMessage());
-                    throw new ImportException("Unexpected error during import", e);
-                }
-                return messages;
+                return performImport(this::updateProgress);
             }
         };
+        task.progressProperty().addListener(
+            (obs, oldProgress, newProgress) -> pbImport.setProgress(newProgress.doubleValue()));
+        task.setOnSucceeded(e -> onImportSuccess(task.getValue()));
+        task.setOnFailed(e -> onImportFailed(task.getException()));
+        new Thread(task).start();
+    }
 
-        task.progressProperty().addListener((obs, oldProgress, newProgress) -> pbImport.setProgress(newProgress.doubleValue()));
-        task.setOnSucceeded(e -> {
-            hbProgress.setVisible(false);
-            List<String> messages = task.getValue();
-            if (messages != null && !messages.isEmpty()) {
-                StringBuilder sb = new StringBuilder();
-                sb.append("Выполненные действия:\n\n");
-                for (String msg : messages) {
-                    sb.append("• ").append(msg).append("\n");
+    private List<String> performImport(BiConsumer<Long, Long> progressUpdater) throws ImportException {
+        List<String> messages = new ArrayList<>();
+        try {
+            File file = new File(tfInputFileName.getText());
+            try (FileInputStream fis = new FileInputStream(file);
+                 XSSFWorkbook wb = new XSSFWorkbook(fis)) {
+                XSSFSheet sheet = wb.getSheetAt(0);
+                int totalRows = sheet.getLastRowNum();
+                if (totalRows < 2)
+                    return new ArrayList<>();
+                else {
+                    pbImport.setProgress(0);
+                    hbProgress.setVisible(true);
                 }
-                Utils.showInfo(sb.toString());
-            } else {
-                Alert alert = new Alert(Alert.AlertType.INFORMATION);
-                alert.setHeaderText("Обработка файла завершена.");
-                alert.setTitle("Готово");
-                alert.showAndWait();
+                for (Row row : sheet) {
+                    processSheetRow(row, totalRows, messages, progressUpdater);
+                }
             }
-        });
-        task.setOnFailed(e -> {
-            hbProgress.setVisible(false);
-            Throwable exception = task.getException();
-            if (exception != null) {
-                Utils.showErrorAndStack((Exception) exception);
-            } else {
-                Utils.showError("Произошла неизвестная ошибка при обработке файла.");
+        } catch (IOException e) {
+            messages.add("Критическая ошибка ввода-вывода: " + e.getMessage());
+            throw new ImportException("IO error during import", e);
+        } catch (Exception e) {
+            messages.add("Критическая ошибка: " + e.getMessage());
+            throw new ImportException("Unexpected error during import", e);
+        }
+        return messages;
+    }
+
+    private void onImportSuccess(List<String> messages) {
+        hbProgress.setVisible(false);
+        if (messages != null && !messages.isEmpty()) {
+            StringBuilder sb = new StringBuilder();
+            sb.append("Выполненные действия:\n\n");
+            for (String msg : messages) {
+                sb.append("• ").append(msg).append("\n");
             }
-        });
-        Thread th = new Thread(task);
-        th.start();
+            Utils.showInfo(sb.toString());
+        } else {
+            Alert alert = new Alert(Alert.AlertType.INFORMATION);
+            alert.setHeaderText("Обработка файла завершена.");
+            alert.setTitle("Готово");
+            alert.showAndWait();
+        }
+    }
+
+    private void onImportFailed(Throwable exception) {
+        hbProgress.setVisible(false);
+        if (exception != null) {
+            Utils.showErrorAndStack((Exception) exception);
+        } else {
+            Utils.showError("Произошла неизвестная ошибка при обработке файла.");
+        }
     }
 
     private void processSheetRow(Row row, int totalRows, List<String> messages,
-            BiConsumer<Long, Long> progressUpdater) throws SQLException {
+            BiConsumer<Long, Long> progressUpdater) {
+        try {
+            RowData data = parseRowData(row, messages);
+            if (data == null) return;
+
+            SavedTask st = getTask(data.extRefNum());
+            if (st != null) {
+                updateExistingTask(data, st, row.getRowNum(), messages);
+            } else {
+                int rid = getRequesterID(data.requester(), data.organization(), messages);
+                if (rid != 0) {
+                    insertTask(data.taskName(), data.executorFI(), data.creationDate(),
+                            data.extRefNum(), rid, messages);
+                }
+            }
+            progressUpdater.accept((long) row.getRowNum(), (long) totalRows);
+        } catch (SQLException e) {
+            messages.add("Ошибка при обработке строки " + (row.getRowNum() + 1) + ": " + e.getMessage());
+        }
+    }
+
+    private RowData parseRowData(Row row, List<String> messages) {
         String taskName = getCellAsString(row.getCell(0));
-        if (taskName == null || taskName.equals("Тема")) return; // Заголовок таблицы пропускаем
+        if (taskName == null || taskName.equals("Тема")) return null;
         String executorFI = getCellAsString(row.getCell(1));
         if (executorFI == null || executorFI.isEmpty()) {
             messages.add(String.format(MSG_EMPTY_FIELD, row.getRowNum() + 1, "Исполнитель"));
-            return;
+            return null;
         }
         Date creationDate = getCellAsDate(row.getCell(2));
         if (creationDate == null) {
             messages.add(String.format(MSG_EMPTY_DATE, row.getRowNum() + 1));
-            return;
+            return null;
         }
         String extRefNum = getCellAsString(row.getCell(3));
         if (extRefNum == null || extRefNum.isEmpty()) {
             messages.add(String.format(MSG_EMPTY_FIELD, row.getRowNum() + 1, "№ обращения"));
-            return;
+            return null;
         }
         String requester = getCellAsString(row.getCell(4));
         if (requester == null || requester.isEmpty()) {
             messages.add(String.format(MSG_EMPTY_FIELD, row.getRowNum() + 1, "Заявитель"));
-            return;
+            return null;
         }
         String organization = getCellAsString(row.getCell(5));
         if (organization == null || organization.isEmpty()) {
             messages.add(String.format(MSG_EMPTY_FIELD, row.getRowNum() + 1, "Организация"));
-            return;
+            return null;
         }
-        SavedTask st = getTask(extRefNum);
-        if (st != null) {
-            boolean updated = false;
-            StringBuilder updates = new StringBuilder();
+        return new RowData(taskName, executorFI, creationDate, extRefNum, requester, organization);
+    }
 
-            // Check for task name change
-            if (hasTaskNameChanged(taskName, st)) {
-                updates.append("название: '").append(st.taskName()).append("' -> '").append(taskName).append("'");
-                updated = true;
-            }
+    private void updateExistingTask(RowData data, SavedTask st, int rowIdx,
+            List<String> messages) throws SQLException {
 
-            // Check for creation date change
-            boolean creationDateChanged = st.creationDate() != null && !st.creationDate().equals(creationDate);
-            if (creationDateChanged) {
-                if (updated) updates.append(", ");
-                String oldDate = Utils.toLocalDate(st.creationDate()).format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM));
-                String newDate = Utils.toLocalDate(creationDate).format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM));
-                updates.append("дата: ").append(oldDate).append(" -> ").append(newDate);
-                updated = true;
-            }
+        // 1. Detect
+        boolean taskNameChanged     = hasTaskNameChanged(data.taskName(), st);
+        boolean creationDateChanged = st.creationDate() != null
+                && !st.creationDate().equals(data.creationDate());
+        boolean executorChanged     = !st.executor().equals(data.executorFI());
+        int newRequesterId          = getRequesterID(data.requester(), data.organization(), messages);
+        boolean requesterChanged    = st.requesterId() != newRequesterId;
 
-            // Check for executor change
-            if (!st.executor().equals(executorFI)) {
-                int executorId = getExecutorID(executorFI, messages);
-                if (executorId == 0) {
-                    messages.add("Строка " + (row.getRowNum() + 1) + ": не удалось определить исполнителя: " + executorFI + ", пропускаем запись");
-                    return;
-                }
-                try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET executor_id=? WHERE id=?")) {
-                    pstmt.setInt(1, executorId);
-                    pstmt.setInt(2, st.taskId());
-                    int ur = pstmt.executeUpdate();
-                    if (ur == 1) {
-                        if (updated) updates.append(", ");
-                        updates.append("исполнитель: ").append(executorFI);
-                        updated = true;
-                    }
-                }
-            }
-
-            // Check for requester
-            if (st.requesterId() == 0) {
-                int rid = getRequesterID(requester, organization, messages);
-                if (rid == 0) {
-                    if (updated) {
-                        messages.add("Обновлена задача " + extRefNum + ": " + updates.toString());
-                    }
-                    progressUpdater.accept((long) row.getRowNum(), (long) totalRows);
-                    return;
-                }
-                try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET requester_id=? WHERE id=?")) {
-                    pstmt.setInt(1, rid);
-                    pstmt.setInt(2, st.taskId());
-                    int ur = pstmt.executeUpdate();
-                    if (ur == 1) {
-                        if (updated) updates.append(", ");
-                        updates.append("id заявителя: ").append(rid);
-                        updated = true;
-                    }
-                }
-            }
-
-            // Update task name and/or date if they changed
-            if (hasTaskNameChanged(taskName, st)) {
-                try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET taskName=? WHERE id=?")) {
-                    pstmt.setString(1, taskName);
-                    pstmt.setInt(2, st.taskId());
-                    pstmt.executeUpdate();
-                }
-            }
-            if (creationDateChanged) {
-                try (PreparedStatement pstmt = connection.prepareStatement("UPDATE Tasks SET creationDate=? WHERE id=?")) {
-                    pstmt.setDate(1, new java.sql.Date(creationDate.getTime()));
-                    pstmt.setInt(2, st.taskId());
-                    pstmt.executeUpdate();
-                }
-            }
-
-            if (updated) {
-                messages.add("Обновлена задача " + extRefNum + ": " + updates.toString());
-            }
-        } else {
-            int rid = getRequesterID(requester, organization, messages);
-            if (rid == 0) {
-                progressUpdater.accept((long) row.getRowNum(), (long) totalRows);
+        // 2. Validate
+        int newExecutorId = 0;
+        if (executorChanged) {
+            newExecutorId = getExecutorID(data.executorFI(), messages);
+            if (newExecutorId == 0) {
+                messages.add("Строка " + rowIdx + ": не удалось определить исполнителя: "
+                        + data.executorFI() + ", пропускаем запись");
                 return;
             }
-            insertTask(taskName, executorFI, creationDate, extRefNum, rid, messages);
         }
-        progressUpdater.accept((long) row.getRowNum(), (long) totalRows);
+        if (requesterChanged && newRequesterId == 0) return;  // getRequesterID already logged
+
+        // 3. Execute + 4. Report
+        StringBuilder updates = new StringBuilder();
+
+        if (taskNameChanged) {
+            updateTaskNameField(st.taskId(), data.taskName());
+            appendSep(updates);
+            updates.append("название: '").append(st.taskName()).append("' -> '").append(data.taskName()).append("'");
+        }
+        if (creationDateChanged) {
+            updateCreationDateField(st.taskId(), data.creationDate());
+            appendSep(updates);
+            String oldDate = Utils.localizeDate(Utils.toLocalDate(st.creationDate()), Locale.forLanguageTag("ru"));
+            String newDate = Utils.localizeDate(Utils.toLocalDate(data.creationDate()), Locale.forLanguageTag("ru"));
+            updates.append("дата: ").append(oldDate).append(" -> ").append(newDate);
+        }
+        if (executorChanged) {
+            updateExecutorField(st.taskId(), newExecutorId);
+            appendSep(updates);
+            updates.append("исполнитель: ").append(st.executor()).append(" -> ").append(data.executorFI());
+        }
+        if (requesterChanged) {
+            updateRequesterField(st.taskId(), newRequesterId);
+            appendSep(updates);
+            updates.append("заявитель: ").append(st.requester()).append(" -> ").append(data.requester());
+        }
+
+        if (!updates.isEmpty())
+            messages.add("Обновлена задача " + data.extRefNum() + ": " + updates);
+    }
+
+    private static void appendSep(StringBuilder sb) {
+        if (!sb.isEmpty()) sb.append(", ");
+    }
+
+    private void updateExecutorField(int taskId, int executorId) throws SQLException {
+        try (PreparedStatement pstmt = connection.prepareStatement(
+                "UPDATE Tasks SET executor_id=? WHERE id=?")) {
+            pstmt.setInt(1, executorId);
+            pstmt.setInt(2, taskId);
+            pstmt.executeUpdate();
+        }
+    }
+
+    private void updateRequesterField(int taskId, int requesterId) throws SQLException {
+        try (PreparedStatement pstmt = connection.prepareStatement(
+                "UPDATE Tasks SET requester_id=? WHERE id=?")) {
+            pstmt.setInt(1, requesterId);
+            pstmt.setInt(2, taskId);
+            pstmt.executeUpdate();
+        }
+    }
+
+    private void updateTaskNameField(int taskId, String taskName) throws SQLException {
+        try (PreparedStatement pstmt = connection.prepareStatement(
+                "UPDATE Tasks SET taskName=? WHERE id=?")) {
+            pstmt.setString(1, taskName);
+            pstmt.setInt(2, taskId);
+            pstmt.executeUpdate();
+        }
+    }
+
+    private void updateCreationDateField(int taskId, Date creationDate) throws SQLException {
+        try (PreparedStatement pstmt = connection.prepareStatement(
+                "UPDATE Tasks SET creationDate=? WHERE id=?")) {
+            pstmt.setDate(1, new java.sql.Date(creationDate.getTime()));
+            pstmt.setInt(2, taskId);
+            pstmt.executeUpdate();
+        }
     }
 
     private SavedTask getTask(String extRefNum) throws SQLException {
         SavedTask st = null;
         try (PreparedStatement pstmt = connection.prepareStatement(
-                "SELECT t.id, t.executor_id, t.requester_id, u.fio, t.taskName, t.creationDate " +
+                "SELECT t.id, t.executor_id, t.requester_id, u.fio, r.fio reqfio, t.taskName, t.creationDate " +
                 "FROM Tasks t " +
                 "INNER JOIN Users u ON t.executor_id = u.id " +
+                "LEFT JOIN Requesters r ON r.id = t.requester_id " +
                 "WHERE extRefNum = ?")) {
             pstmt.setString(1, extRefNum);
             try (ResultSet rs = pstmt.executeQuery()) {
                 while (rs.next()) {
                     st = new SavedTask(rs.getInt("id"), extRefNum, rs.getString("fio"), rs.getInt("executor_id"),
-                                    rs.getInt("requester_id"), rs.getString("taskName"), rs.getDate("creationDate"));
+                                    rs.getInt("requester_id"), rs.getString("reqfio"), rs.getString("taskName"), rs.getDate("creationDate"));
                 }
             }
         }
