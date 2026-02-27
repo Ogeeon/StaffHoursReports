@@ -1,5 +1,6 @@
 package staffhoursreports;
 
+import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import javafx.concurrent.Task;
 import javafx.fxml.FXML;
@@ -14,6 +15,8 @@ import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.ss.util.CellRangeAddress;
+import org.apache.poi.ss.util.RegionUtil;
 import org.apache.poi.xssf.usermodel.*;
 
 import java.awt.*;
@@ -35,6 +38,7 @@ public class RootPaneView implements Initializable {
     private static final String ZI_DST_DIR_KEY = "zi_dst_dir";
     private static final String MSG_EMPTY_FIELD = "Строка %d: пустое поле '%s', пропускаем запись";
     private static final String MSG_EMPTY_DATE  = "Строка %d: пустое или некорректное поле 'Дата', пропускаем запись";
+    private static final String REPORT_FONT_NAME = "Times New Roman";
     private static final String HOURS_SQL =
         "select Users.FIO usrFIO, Tasks.taskName, hrt.totals, Tasks.CreationDate, Tasks.extRefNum" +
         ", Requesters.Organization, Requesters.FIO reqFIO, Users.category " +
@@ -78,7 +82,7 @@ public class RootPaneView implements Initializable {
     Connection connection = null;
     private final FileChooser fileChooser = new FileChooser();
     private final Preferences preferences = Preferences.userNodeForPackage(RootPaneView.class);
-    private Map<String, Double> rates;
+    private Config costsConfig;
 
     @FXML
     private BorderPane topPane;
@@ -108,18 +112,14 @@ public class RootPaneView implements Initializable {
         tfInputFileName.setText(preferences.get(ZI_SRC_FN_KEY, "i:\\УИТ\\ОП\\_Регламентная отчетность\\Отчет по ЗИ\\ЗИ_2020-КНПЗ.xlsx"));
         lblOutputDir.setText(preferences.get(ZI_DST_DIR_KEY, "i:\\УИТ\\ОП\\_Регламентная отчетность\\Отчет по ЗИ"));
         LocalDate currDate = LocalDate.now();
-        if (currDate.getDayOfMonth() < 16)
+        if (currDate.getDayOfMonth() < 15)
             currDate = currDate.minusMonths(1);
-        LocalDate dateTo = LocalDate.of(currDate.getYear(), currDate.getMonth(), 15);
+        LocalDate dateTo = LocalDate.of(currDate.getYear(), currDate.getMonth(), 14);
         LocalDate dateFrom = dateTo.minusMonths(1).plusDays(1);
         dtpckStart.setValue(dateFrom);
         dtpckEnd.setValue(dateTo);
         tfOutputFileName.setText(getReportName(dateFrom, dateTo));
-        rates = new HashMap<>();
-        rates.put("К4", ConfigFactory.load().getDouble("costs.k4"));
-        rates.put("К3", ConfigFactory.load().getDouble("costs.k3"));
-        rates.put("К2", ConfigFactory.load().getDouble("costs.k2"));
-        rates.put("К1", ConfigFactory.load().getDouble("costs.k1"));
+        costsConfig = ConfigFactory.load().getConfig("costs");
     }
 
     private String getCellAsString(Cell cell) {
@@ -506,63 +506,223 @@ public class RootPaneView implements Initializable {
         }
 
         XSSFWorkbook workbook = new XSSFWorkbook();
-        Sheet sheet = workbook.createSheet("Отчёт по заявкам");
+        Sheet sheet = workbook.createSheet("Отчет");
         setupSheetColumns(sheet);
         
         putCaption(workbook, sheet);
-        processRecords(workbook, sheet);
+        int lastRowNum = processRecords(workbook, sheet);
+        putFooter(workbook, sheet, lastRowNum);
         
         saveAndOpenWorkbook(workbook);
     }
 
     private void putCaption(XSSFWorkbook workbook, Sheet sheet) {
-        Row caption = sheet.createRow(0);
-        CellStyle captionStyle = workbook.createCellStyle();
+        // --- Preamble rows ---
+        XSSFFont preambleFont = workbook.createFont();
+        preambleFont.setFontName(REPORT_FONT_NAME);
+        preambleFont.setFontHeightInPoints((short) 11);
+        preambleFont.setBold(true);
+        CellStyle preambleStyle = workbook.createCellStyle();
+        preambleStyle.setFont(preambleFont);
+        preambleStyle.setAlignment(HorizontalAlignment.RIGHT);
 
-        XSSFFont captionFont = workbook.createFont();
-        captionFont.setFontHeightInPoints((short) 19);
-        captionFont.setBold(true);
-        captionStyle.setFont(captionFont);
+        Row row1 = sheet.createRow(1);
+        Cell preambleCell = row1.createCell(11);
+        preambleCell.setCellValue("Приложение № 1 к акту 1094-02");
+        preambleCell.setCellStyle(preambleStyle);
 
-        Cell headerCell = caption.createCell(0);
-        headerCell.setCellValue(tfOutputFileName.getText().substring(0, tfOutputFileName.getText().length() - 5));
-        headerCell.setCellStyle(captionStyle);
+        Row row2 = sheet.createRow(2);
+        preambleCell = row2.createCell(11);
+        preambleCell.setCellValue("к Договору №  1С0925/01094Д   ");
+        preambleCell.setCellStyle(preambleStyle);
 
-        CellStyle headerStyle = workbook.createCellStyle();
+        Row row3 = sheet.createRow(3);
+        preambleCell = row3.createCell(11);
+        preambleCell.setCellValue("от «___» ____________ 20___ г.");
+        preambleCell.setCellStyle(preambleStyle);
+
+        Row row6 = sheet.createRow(6);
+        Cell titleCell = row6.createCell(3);
+        titleCell.setCellValue("Отчет об оказанных услугах");
+        CellStyle preambleStyleLeft = workbook.createCellStyle();
+        preambleStyleLeft.setFont(preambleFont);
+        preambleStyleLeft.setAlignment(HorizontalAlignment.LEFT);
+        titleCell.setCellStyle(preambleStyleLeft);
+
+        Row row8 = sheet.createRow(8);
+        titleCell = row8.createCell(5);
+        Locale ru = Locale.forLanguageTag("ru");
+        String startFmt = Utils.localizeDate(dtpckStart.getValue(), ru);
+        String endFmt   = Utils.localizeDate(dtpckEnd.getValue(), ru);
+        // localizeDate returns e.g. "27 февраля 2026 г." — wrap day in guillemets
+        startFmt = startFmt.replaceFirst("^(\\d+)", "«$1»");
+        endFmt   = endFmt.replaceFirst("^(\\d+)", "«$1»");
+        titleCell.setCellValue("Отчет об оказанных услугах за период с " + startFmt + " по " + endFmt);
+        CellStyle preambleStyleCentered = workbook.createCellStyle();
+        preambleStyleCentered.setFont(preambleFont);
+        preambleStyleCentered.setAlignment(HorizontalAlignment.CENTER);
+        titleCell.setCellStyle(preambleStyleCentered);
+
+        Row row9 = sheet.createRow(9);
+        titleCell = row9.createCell(5);
+        titleCell.setCellValue("к Договору № _____ от «___» ____________ 20___ г.");
+        titleCell.setCellStyle(preambleStyleCentered);
 
         XSSFFont headerFont = workbook.createFont();
-        headerFont.setFontHeightInPoints((short) 11);
-        headerFont.setBold(true);
+        headerFont.setFontName(REPORT_FONT_NAME);
+        headerFont.setFontHeightInPoints((short) 8);
+        CellStyle headerStyle = workbook.createCellStyle();
         headerStyle.setFont(headerFont);
+        headerStyle.setWrapText(true);
+        headerStyle.setAlignment(HorizontalAlignment.CENTER);
+        headerStyle.setVerticalAlignment(VerticalAlignment.CENTER);
+        headerStyle.setBorderTop(BorderStyle.THIN);
+        headerStyle.setBorderBottom(BorderStyle.THIN);
+        headerStyle.setBorderLeft(BorderStyle.THIN);
+        headerStyle.setBorderRight(BorderStyle.THIN);
 
-        Row header = sheet.createRow(1);
-        Cell cell = header.createCell(0);
-        cell.setCellValue("Исполнитель");
+        // Row 17 (POI 16) — primary header
+        Row hdr0 = sheet.createRow(16);
+        hdr0.setHeightInPoints(45.0f);
+        Cell cell;
+
+        cell = hdr0.createCell(0);
+        cell.setCellValue("Номер запроса на изменение");
         cell.setCellStyle(headerStyle);
 
-        cell = header.createCell(1);
-        cell.setCellValue("№ обращения");
+        cell = hdr0.createCell(1);
+        cell.setCellValue("Краткое описание запроса на изменение");
         cell.setCellStyle(headerStyle);
 
-        cell = header.createCell(2);
-        cell.setCellValue("Наименование");
+        cell = hdr0.createCell(2);
+        cell.setCellValue("Результат работ");
         cell.setCellStyle(headerStyle);
 
-        cell = header.createCell(3);
-        cell.setCellValue("Трудозатраты");
+        cell = hdr0.createCell(3);
+        cell.setCellValue("Наименование и код информационного ресурса");
         cell.setCellStyle(headerStyle);
 
-        cell = header.createCell(4);
-        cell.setCellValue("Дата создания");
+        cell = hdr0.createCell(4);
+        cell.setCellValue("Наименование и код информационной системы");
         cell.setCellStyle(headerStyle);
 
-        cell = header.createCell(5);
-        cell.setCellValue("Организация");
+        cell = hdr0.createCell(5);
+        cell.setCellValue("Предприятие");
         cell.setCellStyle(headerStyle);
 
-        cell = header.createCell(6);
-        cell.setCellValue("Пользователь");
+        cell = hdr0.createCell(6);
+        cell.setCellValue("Категория Специалиста Исполнителя");
         cell.setCellStyle(headerStyle);
+
+        cell = hdr0.createCell(7);
+        cell.setCellValue("Согласованная ставка специалиста Исполнителя");
+        cell.setCellStyle(headerStyle);
+
+        cell = hdr0.createCell(8);
+        cell.setCellValue("Плановая");
+        cell.setCellStyle(headerStyle);
+
+        cell = hdr0.createCell(9);
+        cell.setCellValue("Фактическая трудоемкость");
+        cell.setCellStyle(headerStyle);
+
+        cell = hdr0.createCell(10);
+        cell.setCellValue("Стоимость /работ (рубли)");
+        cell.setCellStyle(headerStyle);
+
+        // Row 18 (POI 17) — sub-headers level 1
+        Row hdr1 = sheet.createRow(17);
+        hdr1.setHeightInPoints(15.0f);
+
+        cell = hdr1.createCell(7);
+        cell.setCellValue("(рубли в час)");
+        cell.setCellStyle(headerStyle);
+
+        cell = hdr1.createCell(8);
+        cell.setCellValue("трудоемкость");
+        cell.setCellStyle(headerStyle);
+
+        cell = hdr1.createCell(9);
+        cell.setCellValue("(часы)");
+        cell.setCellStyle(headerStyle);
+
+        cell = hdr1.createCell(10);
+        cell.setCellValue("без НДС");
+        cell.setCellStyle(headerStyle);
+
+        // Row 19 (POI 18) — sub-headers level 2
+        Row hdr2 = sheet.createRow(18);
+        hdr1.setHeightInPoints(15.0f);
+
+        cell = hdr2.createCell(7);
+        cell.setCellValue("без НДС");
+        cell.setCellStyle(headerStyle);
+
+        cell = hdr2.createCell(8);
+        cell.setCellValue("(часы)");
+        cell.setCellStyle(headerStyle);
+
+        // Empty cells at the end of the table
+        cell = hdr2.createCell(9);
+        cell.setCellStyle(headerStyle);
+        cell = hdr2.createCell(10);
+        cell.setCellStyle(headerStyle);
+
+        // --- Merged regions ---
+        mergeWithBorders(sheet, new CellRangeAddress(16, 18, 0, 0)); // A17:A19
+        mergeWithBorders(sheet, new CellRangeAddress(16, 18, 1, 1)); // B17:B19
+        mergeWithBorders(sheet, new CellRangeAddress(16, 18, 2, 2)); // C17:C19
+        mergeWithBorders(sheet, new CellRangeAddress(16, 18, 3, 3)); // D17:D19
+        mergeWithBorders(sheet, new CellRangeAddress(16, 18, 4, 4)); // E17:E19
+        mergeWithBorders(sheet, new CellRangeAddress(16, 18, 5, 5)); // F17:F19
+        mergeWithBorders(sheet, new CellRangeAddress(16, 18, 6, 6)); // G17:G19
+    }
+
+    private void putFooter(XSSFWorkbook workbook, Sheet sheet, int startRow) {
+        XSSFFont footerFont = workbook.createFont();
+        footerFont.setFontName(REPORT_FONT_NAME);
+        footerFont.setFontHeightInPoints((short) 8);
+        CellStyle footerStyle = workbook.createCellStyle();
+        footerStyle.setFont(footerFont);
+        footerStyle.setWrapText(true);
+        footerStyle.setAlignment(HorizontalAlignment.RIGHT);
+        footerStyle.setVerticalAlignment(VerticalAlignment.CENTER);
+        footerStyle.setBorderTop(BorderStyle.THIN);
+        footerStyle.setBorderBottom(BorderStyle.THIN);
+        footerStyle.setBorderLeft(BorderStyle.THIN);
+        footerStyle.setBorderRight(BorderStyle.THIN);
+
+        CellStyle footerNumStyle = workbook.createCellStyle();
+        footerNumStyle.cloneStyleFrom(footerStyle);
+        footerNumStyle.setAlignment(HorizontalAlignment.CENTER);
+        footerNumStyle.setVerticalAlignment(VerticalAlignment.CENTER);
+        footerNumStyle.setDataFormat(workbook.createDataFormat().getFormat("#,##0.00"));
+
+        String[] labels = {"Итого без НДС:", "НДС:", "Итого с НДС:"};
+        for (int i = 0; i < labels.length; i++) {
+            int rowNum = startRow + i;
+            Row row = sheet.createRow(rowNum);
+            for (int col : new int[]{0, 8, 9}) {
+                row.createCell(col).setCellStyle(footerStyle);
+            }
+            Cell labelCell = row.createCell(1);
+            labelCell.setCellValue(labels[i]);
+            labelCell.setCellStyle(footerStyle);
+            mergeWithBorders(sheet, new CellRangeAddress(rowNum, rowNum, 1, 7));
+            Cell sumCell = row.createCell(10);
+            sumCell.setCellStyle(footerNumStyle);
+            if (i == 0) {
+                sumCell.setCellFormula("SUM(K20:K" + startRow + ")");
+            }
+        }
+    }
+
+    private static void mergeWithBorders(Sheet sheet, CellRangeAddress region) {
+        sheet.addMergedRegion(region);
+        RegionUtil.setBorderTop(BorderStyle.THIN, region, sheet);
+        RegionUtil.setBorderBottom(BorderStyle.THIN, region, sheet);
+        RegionUtil.setBorderLeft(BorderStyle.THIN, region, sheet);
+        RegionUtil.setBorderRight(BorderStyle.THIN, region, sheet);
     }
 
     private boolean confirmFileOverwrite(File dstFile) {
@@ -583,19 +743,24 @@ public class RootPaneView implements Initializable {
     }
 
     private void setupSheetColumns(Sheet sheet) {
-        sheet.setColumnWidth(0, 6600);
-        sheet.setColumnWidth(1, 3800);
-        sheet.setColumnWidth(2, 10560);
-        sheet.setColumnWidth(3, 3800);
-        sheet.setColumnWidth(4, 3800);
-        sheet.setColumnWidth(5, 3800);
-        sheet.setColumnWidth(6, 11880);
-        sheet.setColumnWidth(7, 9240);
+        // (target + 0.714) * 256 rounded to an integer
+        sheet.setColumnWidth(0, 3218);  // A: 11.86
+        sheet.setColumnWidth(1, 6144);  // B: 23.29
+        sheet.setColumnWidth(2, 8265);  // C: 31.57
+        sheet.setColumnWidth(3, 2817);  // D: 10.29
+        sheet.setColumnWidth(4, 3152);  // E: 11.6
+        sheet.setColumnWidth(5, 3840);  // F: 14.29
+        sheet.setColumnWidth(6, 2707);  // G: 9.86
+        sheet.setColumnWidth(7, 2925);  // H: 10.71
+        sheet.setColumnWidth(8, 2742);  // I: 10
+        sheet.setColumnWidth(9, 2669);  // J: 9.71
+        sheet.setColumnWidth(10, 4681); // K: 17.57
+        sheet.setColumnWidth(11, 2340); // L: 8.43
     }
 
-    private void processRecords(XSSFWorkbook workbook, Sheet sheet) {
+    private int processRecords(XSSFWorkbook workbook, Sheet sheet) {
         List<ReportRecord> records = loadRecords(dtpckStart.getValue(), dtpckEnd.getValue());
-        int rowNum = 2;
+        int rowNum = 19;
         
         for (ReportRecord r : records) {
             if (shouldSkipRecord(r)) {
@@ -603,6 +768,7 @@ public class RootPaneView implements Initializable {
             }
             putReportRecord(workbook, sheet, r, rowNum++);
         }
+        return rowNum;
     }
 
     private boolean shouldSkipRecord(ReportRecord repRec) {
@@ -649,31 +815,106 @@ public class RootPaneView implements Initializable {
     }
 
     private void putReportRecord(XSSFWorkbook workbook, Sheet sheet, ReportRecord line, int rowNum) {
-        CreationHelper createHelper = workbook.getCreationHelper();
+        XSSFFont tblFont = workbook.createFont();
+        tblFont.setFontName(REPORT_FONT_NAME);
+        tblFont.setFontHeightInPoints((short) 8);
+        CellStyle tblStyle = workbook.createCellStyle();
+        tblStyle.setFont(tblFont);
+        tblStyle.setWrapText(true);
+        tblStyle.setAlignment(HorizontalAlignment.CENTER);
+        tblStyle.setVerticalAlignment(VerticalAlignment.CENTER);
+        tblStyle.setBorderTop(BorderStyle.THIN);
+        tblStyle.setBorderBottom(BorderStyle.THIN);
+        tblStyle.setBorderLeft(BorderStyle.THIN);
+        tblStyle.setBorderRight(BorderStyle.THIN);
+
         Row row = sheet.createRow(rowNum);
         Cell cell = row.createCell(0);
-        cell.setCellValue(line.userFIO());
+        cell.setCellValue(line.extRefNum());
+        cell.setCellStyle(tblStyle);
 
         cell = row.createCell(1);
-        cell.setCellValue(line.extRefNum());
+        cell.setCellValue(line.taskName());
+        cell.setCellStyle(tblStyle);
 
         cell = row.createCell(2);
-        cell.setCellValue(line.taskName());
+        // TODO: сюда результат работ
+        cell.setCellValue("");
+        cell.setCellStyle(tblStyle);
 
         cell = row.createCell(3);
-        cell.setCellValue(line.totals());
+        // "Наименование и код информационного ресурса"
+        cell.setCellValue("");
+        cell.setCellStyle(tblStyle);
 
         cell = row.createCell(4);
-        CellStyle cellStyle = workbook.createCellStyle();
-        cellStyle.setDataFormat(createHelper.createDataFormat().getFormat("m/d/yy"));
-        cell.setCellStyle(cellStyle);
-        cell.setCellValue(Utils.fromLocalDate(line.creationDate()));
+        if (line.taskName().startsWith("EAM") || line.taskName().startsWith("ЕАМ")) {
+            cell.setCellValue("ЛУС \"Галактика EAM\"");
+        } else {
+            cell.setCellValue("ЛУС \"Галактика ERP\"");
+        }
+        cell.setCellStyle(tblStyle);
 
         cell = row.createCell(5);
         cell.setCellValue(line.requesterOrg());
+        cell.setCellStyle(tblStyle);
 
         cell = row.createCell(6);
-        cell.setCellValue(line.requesterName());
+        cell.setCellValue(line.userCategory());
+        cell.setCellStyle(tblStyle);
+
+        cell = row.createCell(7);
+        cell.setCellValue(getRate(line));
+        cell.setCellStyle(tblStyle);
+
+        cell = row.createCell(8);
+        cell.setCellValue(line.totals());
+        cell.setCellStyle(tblStyle);
+
+        cell = row.createCell(9);
+        cell.setCellValue(line.totals());
+        cell.setCellStyle(tblStyle);
+
+        CellStyle tblNumStyle = workbook.createCellStyle();
+        tblNumStyle.cloneStyleFrom(tblStyle);
+        tblNumStyle.setDataFormat(workbook.createDataFormat().getFormat("#,##0.00"));
+        cell = row.createCell(10);
+        cell.setCellValue(getRate(line) * line.totals());
+        cell.setCellStyle(tblNumStyle);
+    }
+
+    /** Fallback chains: if a category is absent from config, try the next key. */
+    private static final Map<String, String[]> CATEGORY_FALLBACKS = Map.of(
+        "k1", new String[]{"k1", "k2", "k3"},
+        "k2", new String[]{"k2", "k3"},
+        "k3", new String[]{"k3"},
+        "k4", new String[]{"k4"},
+        "k5", new String[]{"k5", "k4"}
+    );
+
+    /** Returns the config sub-key ("erp" or "eam") for a record. */
+    private static String getSystemKey(ReportRecord r) {
+        return (r.taskName().startsWith("EAM") || r.taskName().startsWith("ЕАМ"))
+                ? "eam" : "erp";
+    }
+
+    /**
+     * Looks up the hourly rate for a record, applying category fallbacks.
+     * DB stores Cyrillic "К4"…"К1"; config uses Latin "k4"…"k1".
+     * Returns 0.0 if no matching key is found.
+     */
+    private double getRate(ReportRecord r) {
+        if (r.userCategory() == null) return 0.0;
+        String baseKey = r.userCategory().toLowerCase()
+                          .replace("к", "k");   // Cyrillic К -> Latin k
+        String systemKey = getSystemKey(r);
+        String[] fallbacks = CATEGORY_FALLBACKS.getOrDefault(baseKey, new String[]{baseKey});
+        for (String key : fallbacks) {
+            if (costsConfig.hasPath(systemKey + "." + key)) {
+                return costsConfig.getDouble(systemKey + "." + key);
+            }
+        }
+        return 0.0;
     }
 
     private boolean hasTaskNameChanged(String taskName, SavedTask st) {
