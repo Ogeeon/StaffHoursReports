@@ -62,11 +62,15 @@ public class Utils {
     }
 
     public static void showInfo(String s) {
+        showInfo("Обработка файла завершена.", s);
+    }
+
+    public static void showInfo(String headerText, String body) {
         Alert alert = new Alert(AlertType.INFORMATION);
         alert.setTitle("Информация");
-        alert.setHeaderText("Обработка файла завершена.");
+        alert.setHeaderText(headerText);
 
-        TextArea textArea = new TextArea(s);
+        TextArea textArea = new TextArea(body);
         textArea.setEditable(false);
         textArea.setWrapText(false);
 
@@ -79,7 +83,7 @@ public class Utils {
         expContent.setMaxWidth(Double.MAX_VALUE);
         expContent.add(textArea, 0, 1);
 
-        alert.getDialogPane().setExpandableContent(expContent);
+        alert.getDialogPane().setContent(expContent);
         alert.getDialogPane().setPrefWidth(800);
         alert.getDialogPane().setMinWidth(600);
 

@@ -11,6 +11,7 @@ import javafx.scene.control.TextField;
 import javafx.scene.control.*;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
+import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import org.apache.poi.ss.usermodel.Cell;
@@ -24,6 +25,8 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.util.function.Predicate;
 import java.net.URL;
 import java.sql.*;
 import java.time.LocalDate;
@@ -36,6 +39,7 @@ import java.util.prefs.Preferences;
 public class RootPaneView implements Initializable {
     private static final String ZI_SRC_FN_KEY = "zi_src_fn";
     private static final String ZI_DST_DIR_KEY = "zi_dst_dir";
+    private static final String OBSIDIAN_DIR_KEY = "obsidian_dir";
     private static final String MSG_EMPTY_FIELD = "Строка %d: пустое поле '%s', пропускаем запись";
     private static final String MSG_EMPTY_DATE  = "Строка %d: пустое или некорректное поле 'Дата', пропускаем запись";
     private static final String REPORT_FONT_NAME = "Times New Roman";
@@ -104,6 +108,10 @@ public class RootPaneView implements Initializable {
     private DatePicker dtpckStart;
     @FXML
     private DatePicker dtpckEnd;
+    @FXML
+    private Label lblObsidianDir;
+    @FXML
+    private CheckBox cbIncludeActiveTasks;
 
     @Override
     public void initialize(URL location, ResourceBundle resources) {
@@ -111,6 +119,7 @@ public class RootPaneView implements Initializable {
         fileChooser.getExtensionFilters().addAll(new FileChooser.ExtensionFilter("Файлы Excel", "*.xlsx"));
         tfInputFileName.setText(preferences.get(ZI_SRC_FN_KEY, "i:\\УИТ\\ОП\\_Регламентная отчетность\\Отчет по ЗИ\\ЗИ_2020-КНПЗ.xlsx"));
         lblOutputDir.setText(preferences.get(ZI_DST_DIR_KEY, "i:\\УИТ\\ОП\\_Регламентная отчетность\\Отчет по ЗИ"));
+        lblObsidianDir.setText(preferences.get(OBSIDIAN_DIR_KEY, ""));
         LocalDate currDate = LocalDate.now();
         if (currDate.getDayOfMonth() < 15)
             currDate = currDate.minusMonths(1);
@@ -490,6 +499,23 @@ public class RootPaneView implements Initializable {
     }
 
     @FXML
+    private void handleBrowseObsidianClick() {
+        Stage root = ((Stage) topPane.getScene().getWindow());
+        DirectoryChooser dirChooser = new DirectoryChooser();
+        dirChooser.setTitle("Каталог заметок Obsidian");
+        String obsidianDir = preferences.get(OBSIDIAN_DIR_KEY, "");
+        if (!obsidianDir.isEmpty()) {
+            File dir = new File(obsidianDir);
+            if (dir.exists()) dirChooser.setInitialDirectory(dir);
+        }
+        File selected = dirChooser.showDialog(root);
+        if (selected != null) {
+            lblObsidianDir.setText(selected.getPath());
+            preferences.put(OBSIDIAN_DIR_KEY, selected.getPath());
+        }
+    }
+
+    @FXML
     private void handleDateChange() {
         tfOutputFileName.setText(getReportName(dtpckStart.getValue(), dtpckEnd.getValue()));
     }
@@ -505,15 +531,23 @@ public class RootPaneView implements Initializable {
             return;
         }
 
+        List<String> messages = new ArrayList<>();
         XSSFWorkbook workbook = new XSSFWorkbook();
         Sheet sheet = workbook.createSheet("Отчет");
         setupSheetColumns(sheet);
-        
+
         putCaption(workbook, sheet);
-        int lastRowNum = processRecords(workbook, sheet);
+        int lastRowNum = processRecords(workbook, sheet, messages);
         putFooter(workbook, sheet, lastRowNum);
-        
+
         saveAndOpenWorkbook(workbook);
+        if (!messages.isEmpty()) {
+            StringBuilder sb = new StringBuilder();
+            for (String msg : messages) {
+                sb.append("• ").append(msg).append("\n");
+            }
+            Utils.showInfo("Уведомления при формировании отчёта:", sb.toString());
+        }
     }
 
     private void putCaption(XSSFWorkbook workbook, Sheet sheet) {
@@ -758,28 +792,34 @@ public class RootPaneView implements Initializable {
         sheet.setColumnWidth(11, 2340); // L: 8.43
     }
 
-    private int processRecords(XSSFWorkbook workbook, Sheet sheet) {
+    private int processRecords(XSSFWorkbook workbook, Sheet sheet, List<String> messages) {
         List<ReportRecord> records = loadRecords(dtpckStart.getValue(), dtpckEnd.getValue());
         int rowNum = 19;
-        
+
         for (ReportRecord r : records) {
             if (shouldSkipRecord(r)) {
                 continue;
             }
-            putReportRecord(workbook, sheet, r, rowNum++);
+            String solution = lookupObsidianSolution(r, messages);
+            if (solution == null) {
+                continue;
+            }
+            putReportRecord(workbook, sheet, r, rowNum++, solution);
         }
         return rowNum;
     }
 
     private boolean shouldSkipRecord(ReportRecord repRec) {
-        return repRec.taskName().startsWith("SAP") || repRec.taskName().startsWith("САП");
+        return repRec.taskName().startsWith("SAP") || repRec.taskName().startsWith("САП")
+                || repRec.taskName().startsWith("РН-Транс");
     }
 
     private void saveAndOpenWorkbook(XSSFWorkbook workbook) {
         String fileLocation = lblOutputDir.getText() + "\\" + tfOutputFileName.getText();
         try {
-            FileOutputStream outputStream = new FileOutputStream(fileLocation);
-            workbook.write(outputStream);
+            try (FileOutputStream outputStream = new FileOutputStream(fileLocation)) {
+                workbook.write(outputStream);
+            }
             workbook.close();
             Desktop.getDesktop().open(new File(fileLocation));
         } catch (IOException e) {
@@ -814,7 +854,7 @@ public class RootPaneView implements Initializable {
         return result;
     }
 
-    private void putReportRecord(XSSFWorkbook workbook, Sheet sheet, ReportRecord line, int rowNum) {
+    private void putReportRecord(XSSFWorkbook workbook, Sheet sheet, ReportRecord line, int rowNum, String solution) {
         XSSFFont tblFont = workbook.createFont();
         tblFont.setFontName(REPORT_FONT_NAME);
         tblFont.setFontHeightInPoints((short) 8);
@@ -838,8 +878,7 @@ public class RootPaneView implements Initializable {
         cell.setCellStyle(tblStyle);
 
         cell = row.createCell(2);
-        // TODO: сюда результат работ
-        cell.setCellValue("");
+        cell.setCellValue(solution);
         cell.setCellStyle(tblStyle);
 
         cell = row.createCell(3);
@@ -919,6 +958,79 @@ public class RootPaneView implements Initializable {
 
     private boolean hasTaskNameChanged(String taskName, SavedTask st) {
         return taskName != null && !taskName.isEmpty() && st.taskName() != null && !st.taskName().equals(taskName);
+    }
+
+    private String lookupObsidianSolution(ReportRecord r, List<String> messages) {
+        String dir = lblObsidianDir.getText();
+        if (dir == null || dir.isBlank()) return "";
+        File root = new File(dir);
+        if (!root.exists() || !root.isDirectory()) return "";
+
+        File found = walkFiles(root, f -> f.getName().equalsIgnoreCase(r.taskName() + ".md"));
+
+        if (found == null && r.extRefNum() != null && !r.extRefNum().isBlank()) {
+            found = walkFiles(root, f -> {
+                try {
+                    return Files.readString(f.toPath()).contains(r.extRefNum());
+                } catch (IOException e) {
+                    return false;
+                }
+            });
+        }
+
+        if (found == null) {
+            messages.add("Заметка не найдена: " + r.extRefNum() + "-" + r.taskName());
+            return "";
+        }
+
+        if (!cbIncludeActiveTasks.isSelected() && isInFolder(found, "5_Active_Tasks")) {
+            return null;
+        }
+
+        return extractSolution(found, r.extRefNum(), r.taskName(), messages);
+    }
+
+    private File walkFiles(File dir, Predicate<File> matcher) {
+        File[] files = dir.listFiles();
+        if (files == null) return null;
+        for (File f : files) {
+            if (f.isDirectory()) {
+                File result = walkFiles(f, matcher);
+                if (result != null) return result;
+            } else if (f.getName().endsWith(".md") && matcher.test(f)) {
+                return f;
+            }
+        }
+        return null;
+    }
+
+    private boolean isInFolder(File file, String folderName) {
+        File parent = file.getParentFile();
+        while (parent != null) {
+            if (parent.getName().equals(folderName)) return true;
+            parent = parent.getParentFile();
+        }
+        return false;
+    }
+
+    private String extractSolution(File file, String extRefNum, String taskName, List<String> messages) {
+        try {
+            List<String> lines = Files.readAllLines(file.toPath());
+            for (int i = 0; i < lines.size(); i++) {
+                if (lines.get(i).trim().equals("## Решение")) {
+                    if (i + 1 >= lines.size() || lines.get(i + 1).trim().isEmpty()) {
+                        messages.add("Пустое решение в заметке: " + extRefNum + "-" + taskName);
+                        return "";
+                    }
+                    return lines.get(i + 1).trim();
+                }
+            }
+            messages.add("Не найден блок '## Решение': " + extRefNum + "-" + taskName);
+            return "";
+        } catch (IOException e) {
+            messages.add("Ошибка чтения заметки [" + extRefNum + "-" + taskName + "]: " + e.getMessage());
+            return "";
+        }
     }
 
 }
